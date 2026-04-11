@@ -1,0 +1,10 @@
+{
+  "name": "zcabh-github-io",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate": "node ./scripts/validate-pages.mjs",
+    "build": "node ./scripts/build-pages.mjs",
+    "preview": "python3 -m http.server 4173 --directory dist"
+  }
+}

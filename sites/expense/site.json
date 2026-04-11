@@ -1,0 +1,7 @@
+{
+  "slug": "expense",
+  "title": "Track Your Expense",
+  "description": "GitHub에 저장된 개인 지출 JSON을 브라우저에서 직접 관리하는 웹 앱",
+  "order": 10,
+  "listed": true
+}
