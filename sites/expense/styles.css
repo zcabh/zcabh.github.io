@@ -153,6 +153,25 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.status-bar-neutral {
+  background: var(--surface);
+}
+
+.status-bar-success {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+}
+
+.status-bar-progress {
+  background: #ecfeff;
+  border-color: #99f6e4;
+}
+
+.status-bar-danger {
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
 .status-main {
   display: flex;
   flex-wrap: wrap;
@@ -161,8 +180,18 @@ button:disabled {
   align-items: center;
 }
 
+.status-copy {
+  display: grid;
+  gap: 6px;
+}
+
 .status-summary {
   font-weight: 600;
+}
+
+.status-detail {
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .status-badges {
@@ -187,6 +216,11 @@ button:disabled {
 .badge-success {
   background: #ecfdf5;
   color: var(--success);
+}
+
+.badge-danger {
+  background: #fff1f2;
+  color: #9f1239;
 }
 
 .error-banner {
@@ -419,6 +453,10 @@ button:disabled {
   border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
+}
+
+.field-grid input[readonly] {
+  background: var(--surface-strong);
 }
 
 .field-grid textarea {

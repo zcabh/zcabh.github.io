@@ -48,7 +48,6 @@ import {
 import { decryptToken, encryptToken } from "./crypto.js";
 import { fetchSnapshot, pushSnapshot } from "./github.js";
 import {
-  clearTokenEnvelope,
   loadPersistedState,
   persistSettings,
   persistSnapshot,
@@ -62,7 +61,6 @@ const state = {
   settings: defaultSettings(),
   tokenEnvelope: null,
   sessionToken: null,
-  isDirty: false,
   isBootstrapping: false,
   isSyncing: false,
   errorMessage: "",
@@ -100,10 +98,6 @@ async function initialize() {
 
   normalizeSelection();
   render();
-
-  if (hasStoredConnection() && !state.sessionToken) {
-    openModal("unlock");
-  }
 }
 
 function defaultSettings() {
@@ -138,6 +132,14 @@ function mergeSettings(value) {
 
 function hasStoredConnection() {
   return isGitHubConfigValid(state.settings.gitHubConfig) && Boolean(state.tokenEnvelope);
+}
+
+function isBusy() {
+  return state.isBootstrapping || state.isSyncing;
+}
+
+function isConnectionLocked() {
+  return hasStoredConnection() && !state.sessionToken;
 }
 
 function requiresOnboarding() {
@@ -176,9 +178,52 @@ function canRunRemoteAction() {
   return Boolean(
     isGitHubConfigValid(state.settings.gitHubConfig) &&
       state.sessionToken &&
-      !state.isBootstrapping &&
-      !state.isSyncing
+      !isBusy()
   );
+}
+
+function canEditSnapshot() {
+  return canRunRemoteAction();
+}
+
+function disabledAttr(disabled) {
+  return disabled ? "disabled" : "";
+}
+
+function lockedMutationMessage() {
+  if (state.sessionToken) {
+    return "GitHub 작업이 끝난 뒤 다시 시도하세요.";
+  }
+  return "잠금 해제 후 수정할 수 있습니다.";
+}
+
+function assertEditableSnapshot() {
+  if (!canEditSnapshot()) {
+    throw new Error(lockedMutationMessage());
+  }
+}
+
+function gitHubConfigEquals(left, right) {
+  const normalizedLeft = trimmedGitHubConfig(left);
+  const normalizedRight = trimmedGitHubConfig(right);
+  return (
+    normalizedLeft.owner === normalizedRight.owner &&
+    normalizedLeft.repo === normalizedRight.repo &&
+    normalizedLeft.branch === normalizedRight.branch &&
+    normalizedLeft.filePath === normalizedRight.filePath
+  );
+}
+
+function applyFetchedSnapshot(envelope, overrides = {}) {
+  const fetchedAt = new Date().toISOString();
+  state.snapshot = envelope.snapshot;
+  state.settings = {
+    ...state.settings,
+    ...overrides,
+    remoteSHA: envelope.sha,
+    lastFetchedAt: fetchedAt,
+  };
+  normalizeSelection();
 }
 
 function normalizeSelection() {
@@ -231,7 +276,7 @@ function renderOnboarding() {
           <div class="stack">
             <div class="badge badge-success">정적 호스팅 가능</div>
             <div class="muted">public web repo + private data repo 조합을 기준으로 설계했습니다.</div>
-            <div class="muted">토큰은 브라우저에 암호화 저장되고, 다시 방문하면 passphrase로 잠금 해제합니다.</div>
+            <div class="muted">토큰은 브라우저에 암호화 저장되고, 잠금 해제 후 최신 remote를 다시 확인합니다.</div>
           </div>
         </div>
         <div class="onboarding-form-wrap">
@@ -242,6 +287,7 @@ function renderOnboarding() {
               showTokenFields,
               showCloseButton: false,
               isOnboarding: true,
+              submitLabel: "연결하고 시작",
             })}
           </form>
         </div>
@@ -257,6 +303,8 @@ function renderDashboard() {
   const occurrences = currentOccurrences();
   const totalAmount = month ? totalAmountForMonth(month, state.snapshot) : 0;
   const todayDateKey = toDateInputValue(new Date());
+  const editable = canEditSnapshot();
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="app-frame">
@@ -264,16 +312,16 @@ function renderDashboard() {
         <div class="brand-block">
           <h1 class="brand-title">Track Your Expense Web</h1>
           <p class="brand-copy">
-            로컬 편집은 즉시 반영되고, 원격 반영은 사용자가 명시적으로 Sync할 때만 일어납니다.
-            앱이 다시 열리면 remote snapshot이 로컬 상태를 교체합니다.
+            잠금 해제하면 GitHub의 최신 JSON을 다시 읽고, 이후 변경 사항은 저장할 때마다 GitHub에 즉시 반영합니다.
+            잠긴 상태에서는 현재 로컬 내역만 조회할 수 있습니다.
           </p>
         </div>
         <div class="header-actions">
-          <button class="button-ghost" type="button" data-action="open-settings">GitHub 설정</button>
+          <button class="button-ghost" type="button" data-action="open-settings" ${busy}>GitHub 설정</button>
           ${
             state.sessionToken
-              ? '<button class="button-ghost" type="button" data-action="lock-session">잠금</button>'
-              : '<button class="button-primary" type="button" data-action="open-unlock">잠금 해제</button>'
+              ? `<button class="button-ghost" type="button" data-action="lock-session" ${busy}>잠금</button>`
+              : `<button class="button-primary" type="button" data-action="open-unlock" ${busy}>잠금 해제</button>`
           }
         </div>
       </div>
@@ -281,33 +329,17 @@ function renderDashboard() {
       ${renderStatusBar()}
 
       <div class="toolbar">
-        <button class="button-ghost" type="button" data-action="open-sources">카드/계좌</button>
-        <button class="button-ghost" type="button" data-action="open-rates">환율 설정</button>
+        <button class="button-ghost" type="button" data-action="open-sources" ${disabledAttr(!editable)}>카드/계좌</button>
+        <button class="button-ghost" type="button" data-action="open-rates" ${disabledAttr(!editable)}>환율 설정</button>
         <button
           class="button-ghost"
           type="button"
           data-action="open-add-expense"
-          ${months().length === 0 || state.snapshot.sources.length === 0 ? "disabled" : ""}
+          ${disabledAttr(!editable || months().length === 0 || state.snapshot.sources.length === 0)}
         >
           지출 추가
         </button>
-        <button class="button-ghost" type="button" data-action="open-add-month">월 추가</button>
-        <button
-          class="button-ghost"
-          type="button"
-          data-action="open-pull-confirm"
-          ${canRunRemoteAction() ? "" : "disabled"}
-        >
-          다시 불러오기
-        </button>
-        <button
-          class="button-primary"
-          type="button"
-          data-action="open-sync-confirm"
-          ${canRunRemoteAction() ? "" : "disabled"}
-        >
-          Sync
-        </button>
+        <button class="button-ghost" type="button" data-action="open-add-month" ${disabledAttr(!editable)}>월 추가</button>
       </div>
 
       ${
@@ -321,7 +353,7 @@ function renderDashboard() {
                     <div class="form-section-title">월 목록</div>
                     <div class="muted">기본 선택은 최신 월입니다.</div>
                   </div>
-                  <button class="button-ghost" type="button" data-action="open-add-month">추가</button>
+                  <button class="button-ghost" type="button" data-action="open-add-month" ${disabledAttr(!editable)}>추가</button>
                 </div>
                 <div class="panel-body month-list">
                   ${months()
@@ -356,6 +388,7 @@ function renderDashboard() {
                     type="button"
                     data-action="delete-month"
                     data-month-key="${yearMonthKey(month)}"
+                    ${disabledAttr(!editable)}
                   >
                     월 삭제
                   </button>
@@ -426,6 +459,7 @@ function renderDashboard() {
                           class="button-ghost"
                           type="button"
                           data-action="open-add-expense"
+                          ${disabledAttr(!editable)}
                         >
                           이 source에 지출 추가
                         </button>
@@ -495,6 +529,7 @@ function renderDashboard() {
                                         type="button"
                                         data-action="edit-expense"
                                         data-expense-id="${entry.expense.id}"
+                                        ${disabledAttr(!editable)}
                                       >
                                         수정
                                       </button>
@@ -503,6 +538,7 @@ function renderDashboard() {
                                         type="button"
                                         data-action="delete-expense"
                                         data-expense-id="${entry.expense.id}"
+                                        ${disabledAttr(!editable)}
                                       >
                                         삭제
                                       </button>
@@ -525,16 +561,19 @@ function renderDashboard() {
 }
 
 function renderStatusBar() {
-  const locked = isGitHubConfigValid(state.settings.gitHubConfig) && !state.sessionToken;
+  const descriptor = statusDescriptor();
 
   return `
-    <section class="status-bar">
+    <section class="status-bar status-bar-${descriptor.tone}">
       <div class="status-main">
-        <div class="status-summary">${escapeHtml(statusSummary())}</div>
+        <div class="status-copy">
+          <div class="status-summary">${escapeHtml(descriptor.summary)}</div>
+          <div class="status-detail">${escapeHtml(descriptor.detail)}</div>
+        </div>
         <div class="status-badges">
-          ${state.isDirty ? '<span class="badge badge-warning">로컬 변경 있음</span>' : ""}
-          ${state.sessionToken ? '<span class="badge badge-success">토큰 잠금 해제됨</span>' : ""}
-          ${locked ? '<span class="badge">잠금 해제 필요</span>' : ""}
+          ${descriptor.badges
+            .map((badge) => `<span class="badge ${badge.className ?? ""}">${escapeHtml(badge.label)}</span>`)
+            .join("")}
         </div>
       </div>
       ${
@@ -547,6 +586,8 @@ function renderStatusBar() {
 }
 
 function renderEmptyDashboard() {
+  const editable = canEditSnapshot();
+
   return `
     <section class="empty-state">
       <div class="empty-state-media">
@@ -559,8 +600,8 @@ function renderEmptyDashboard() {
         </p>
       </div>
       <div class="form-actions" style="justify-content:flex-start;">
-        <button class="button-primary" type="button" data-action="open-add-month">월 추가</button>
-        <button class="button-ghost" type="button" data-action="open-sources">카드/계좌 관리</button>
+        <button class="button-primary" type="button" data-action="open-add-month" ${disabledAttr(!editable)}>월 추가</button>
+        <button class="button-ghost" type="button" data-action="open-sources" ${disabledAttr(!editable)}>카드/계좌 관리</button>
       </div>
     </section>
   `;
@@ -603,6 +644,8 @@ function renderModal() {
 }
 
 function renderUnlockModal() {
+  const busy = disabledAttr(isBusy());
+
   return `
     <div class="modal-backdrop">
       <section class="modal">
@@ -610,29 +653,21 @@ function renderUnlockModal() {
           <div>
             <h2 class="modal-title">토큰 잠금 해제</h2>
             <p class="modal-copy">
-              저장된 GitHub 토큰은 브라우저에 암호화되어 있습니다. passphrase를 입력하면 자동으로 최신 remote snapshot을 다시 불러옵니다.
+              저장된 GitHub 토큰은 브라우저에 암호화되어 있습니다. passphrase를 입력하면 최신 remote snapshot을 다시 확인하고 수정 기능을 다시 켭니다.
             </p>
           </div>
-          ${
-            months().length > 0
-              ? '<button class="button-subtle" type="button" data-action="close-modal">닫기</button>'
-              : ""
-          }
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           <form class="form-grid" data-form="unlock">
             <div class="field-grid">
               <label for="unlock-passphrase">Passphrase</label>
-              <input id="unlock-passphrase" name="passphrase" type="password" autocomplete="current-password" required />
-              <small class="form-note">브라우저를 닫으면 다시 잠금 해제해야 합니다.</small>
+              <input id="unlock-passphrase" name="passphrase" type="password" autocomplete="current-password" required ${busy} />
+              <small class="form-note">잠긴 상태에서는 현재 로컬 내역만 조회할 수 있습니다.</small>
             </div>
             <div class="form-actions">
-              ${
-                months().length > 0
-                  ? '<button class="button-ghost" type="button" data-action="close-modal">취소</button>'
-                  : ""
-              }
-              <button class="button-primary" type="submit">잠금 해제</button>
+              <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
+              <button class="button-primary" type="submit" ${busy}>잠금 해제</button>
             </div>
           </form>
         </div>
@@ -643,6 +678,7 @@ function renderUnlockModal() {
 
 function renderSettingsModal() {
   const config = mergeSettings(state.settings).gitHubConfig;
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -654,7 +690,7 @@ function renderSettingsModal() {
               web app 코드는 public Pages repo에 두고, 실제 지출 데이터는 별도 private repository의 JSON 파일을 가리키는 구성을 권장합니다.
             </p>
           </div>
-          <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           <form class="form-grid" data-form="settings-modal">
@@ -664,6 +700,7 @@ function renderSettingsModal() {
               showTokenFields: true,
               showCloseButton: true,
               isOnboarding: false,
+              submitLabel: "저장하고 확인",
             })}
           </form>
         </div>
@@ -673,29 +710,39 @@ function renderSettingsModal() {
 }
 
 function renderSettingsFields(config, options) {
+  const configLocked = hasStoredConnection() && !state.sessionToken && !options.isOnboarding;
+  const busy = disabledAttr(isBusy());
+  const configReadonly = configLocked ? "readonly" : "";
+
   return `
     <div class="form-grid">
       <div class="split-fields">
         <div class="field-grid">
           <label for="github-owner">Owner</label>
-          <input id="github-owner" name="owner" value="${escapeAttr(config.owner)}" autocomplete="off" required />
+          <input id="github-owner" name="owner" value="${escapeAttr(config.owner)}" autocomplete="off" required ${configReadonly} ${busy} />
         </div>
         <div class="field-grid">
           <label for="github-repo">Repository</label>
-          <input id="github-repo" name="repo" value="${escapeAttr(config.repo)}" autocomplete="off" required />
+          <input id="github-repo" name="repo" value="${escapeAttr(config.repo)}" autocomplete="off" required ${configReadonly} ${busy} />
         </div>
       </div>
 
       <div class="split-fields">
         <div class="field-grid">
           <label for="github-branch">Branch</label>
-          <input id="github-branch" name="branch" value="${escapeAttr(config.branch)}" autocomplete="off" required />
+          <input id="github-branch" name="branch" value="${escapeAttr(config.branch)}" autocomplete="off" required ${configReadonly} ${busy} />
         </div>
         <div class="field-grid">
           <label for="github-path">File Path</label>
-          <input id="github-path" name="filePath" value="${escapeAttr(config.filePath)}" autocomplete="off" required />
+          <input id="github-path" name="filePath" value="${escapeAttr(config.filePath)}" autocomplete="off" required ${configReadonly} ${busy} />
         </div>
       </div>
+
+      ${
+        configLocked
+          ? '<div class="form-note">저장소 경로 변경은 잠금 해제 후에만 할 수 있습니다.</div>'
+          : ""
+      }
 
       ${
         options.showTokenFields
@@ -713,6 +760,7 @@ function renderSettingsFields(config, options) {
                 value="${escapeAttr(options.tokenValue)}"
                 autocomplete="new-password"
                 ${options.isOnboarding && !state.tokenEnvelope ? "required" : ""}
+                ${busy}
               />
               <small class="form-note">
                 private repo 1개만 선택하고 <strong>Contents: Read and write</strong> 권한만 주는 fine-grained PAT를 권장합니다.
@@ -728,6 +776,7 @@ function renderSettingsFields(config, options) {
                 type="password"
                 value="${escapeAttr(options.passphraseValue)}"
                 autocomplete="new-password"
+                ${busy}
               />
               <small class="form-note">
                 토큰을 브라우저에 암호화 저장할 때만 사용합니다. 서버로 전송되지 않습니다.
@@ -740,17 +789,17 @@ function renderSettingsFields(config, options) {
       <div class="field-grid">
         <div class="form-section-title">동작 방식</div>
         <div class="readout muted">
-          앱 시작 시 GitHub JSON을 다시 읽어 로컬 상태를 교체합니다. 원격 반영은 사용자가 Sync 버튼을 눌렀을 때만 수행합니다.
+          잠금 해제하면 GitHub JSON을 다시 읽고, 이후 내역 변경은 저장할 때마다 GitHub JSON에 즉시 반영합니다.
         </div>
       </div>
 
       <div class="form-actions">
         ${
           options.showCloseButton
-            ? '<button class="button-ghost" type="button" data-action="close-modal">취소</button>'
+            ? `<button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>`
             : ""
         }
-        <button class="button-primary" type="submit">저장</button>
+        <button class="button-primary" type="submit" ${busy}>${escapeHtml(options.submitLabel ?? "저장")}</button>
       </div>
     </div>
   `;
@@ -758,6 +807,8 @@ function renderSettingsFields(config, options) {
 
 function renderSourcesModal() {
   const sources = state.snapshot.sources.slice().sort((left, right) => left.id - right.id);
+  const editable = canEditSnapshot();
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -768,8 +819,8 @@ function renderSourcesModal() {
             <p class="modal-copy">source 삭제 시 연결된 모든 지출도 함께 삭제됩니다.</p>
           </div>
           <div class="header-actions">
-            <button class="button-ghost" type="button" data-action="add-source">추가</button>
-            <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+            <button class="button-ghost" type="button" data-action="add-source" ${disabledAttr(!editable)}>추가</button>
+            <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
           </div>
         </div>
         <div class="modal-body">
@@ -803,6 +854,7 @@ function renderSourcesModal() {
                                 type="button"
                                 data-action="edit-source"
                                 data-source-id="${source.id}"
+                                ${disabledAttr(!editable)}
                               >
                                 수정
                               </button>
@@ -811,6 +863,7 @@ function renderSourcesModal() {
                                 type="button"
                                 data-action="delete-source"
                                 data-source-id="${source.id}"
+                                ${disabledAttr(!editable)}
                               >
                                 삭제
                               </button>
@@ -832,6 +885,7 @@ function renderSourcesModal() {
 function renderSourceEditorModal() {
   const draft = state.modal?.draft ?? { id: null, kind: "card", name: "" };
   const isEditing = Boolean(draft.id);
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -841,7 +895,7 @@ function renderSourceEditorModal() {
             <h2 class="modal-title">${isEditing ? "카드/계좌 수정" : "카드/계좌 추가"}</h2>
             <p class="modal-copy">정렬 순서는 항상 source ID 오름차순입니다.</p>
           </div>
-          <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           <form class="form-grid" data-form="source-editor">
@@ -858,6 +912,7 @@ function renderSourceEditorModal() {
                           name="kind"
                           value="${kind}"
                           ${draft.kind === kind ? "checked" : ""}
+                          ${busy}
                         />
                         <span>${sourceKindMeta[kind].title}</span>
                       </label>
@@ -868,11 +923,11 @@ function renderSourceEditorModal() {
             </div>
             <div class="field-grid">
               <label for="source-name">이름</label>
-              <input id="source-name" name="name" value="${escapeAttr(draft.name)}" required />
+              <input id="source-name" name="name" value="${escapeAttr(draft.name)}" required ${busy} />
             </div>
             <div class="form-actions">
-              <button class="button-ghost" type="button" data-action="close-modal">취소</button>
-              <button class="button-primary" type="submit">저장</button>
+              <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
+              <button class="button-primary" type="submit" ${busy}>저장</button>
             </div>
           </form>
         </div>
@@ -885,6 +940,7 @@ function renderMonthEditorModal() {
   const draft = state.modal?.draft ?? {
     month: toMonthInputValue(defaultMonthForCreation(months(), currentMonth() ?? yearMonthFromDate(new Date()))),
   };
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -894,18 +950,18 @@ function renderMonthEditorModal() {
             <h2 class="modal-title">월 추가</h2>
             <p class="modal-copy">월 페이지는 자동 생성되지 않고 사용자가 명시적으로 생성합니다.</p>
           </div>
-          <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           <form class="form-grid" data-form="month-editor">
             <div class="field-grid">
               <label for="month-value">월</label>
-              <input id="month-value" name="month" type="month" value="${escapeAttr(draft.month)}" required />
+              <input id="month-value" name="month" type="month" value="${escapeAttr(draft.month)}" required ${busy} />
               <small class="form-note">저장 시 ${escapeHtml(yearMonthTitle(parseDateInputToYearMonth(draft.month)))} 페이지가 생성됩니다.</small>
             </div>
             <div class="form-actions">
-              <button class="button-ghost" type="button" data-action="close-modal">취소</button>
-              <button class="button-primary" type="submit">저장</button>
+              <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
+              <button class="button-primary" type="submit" ${busy}>저장</button>
             </div>
           </form>
         </div>
@@ -920,6 +976,7 @@ function renderRatesModal() {
     usdToKRWPer1: exchangeRates.usdToKRWPer1 ? String(exchangeRates.usdToKRWPer1) : "",
     jpyToKRWPer100: exchangeRates.jpyToKRWPer100 ? String(exchangeRates.jpyToKRWPer100) : "",
   };
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -927,25 +984,25 @@ function renderRatesModal() {
         <div class="modal-head">
           <div>
             <h2 class="modal-title">환율 설정</h2>
-            <p class="modal-copy">저장한 환율은 sync 대상에 포함되고, 월별 KRW 합계 계산에 즉시 반영됩니다.</p>
+            <p class="modal-copy">저장한 환율은 GitHub JSON에 즉시 반영되고, 월별 KRW 합계 계산에도 바로 반영됩니다.</p>
           </div>
-          <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           <form class="form-grid" data-form="rates-editor">
             <div class="split-fields">
               <div class="field-grid">
                 <label for="usd-rate">1 USD</label>
-                <input id="usd-rate" name="usdToKRWPer1" inputmode="numeric" value="${escapeAttr(draft.usdToKRWPer1)}" required />
+                <input id="usd-rate" name="usdToKRWPer1" inputmode="numeric" value="${escapeAttr(draft.usdToKRWPer1)}" required ${busy} />
               </div>
               <div class="field-grid">
                 <label for="jpy-rate">100 JPY</label>
-                <input id="jpy-rate" name="jpyToKRWPer100" inputmode="numeric" value="${escapeAttr(draft.jpyToKRWPer100)}" required />
+                <input id="jpy-rate" name="jpyToKRWPer100" inputmode="numeric" value="${escapeAttr(draft.jpyToKRWPer100)}" required ${busy} />
               </div>
             </div>
             <div class="form-actions">
-              <button class="button-ghost" type="button" data-action="close-modal">취소</button>
-              <button class="button-primary" type="submit">저장</button>
+              <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
+              <button class="button-primary" type="submit" ${busy}>저장</button>
             </div>
           </form>
         </div>
@@ -961,6 +1018,7 @@ function renderExpenseEditorModal() {
   const monthIssues = buildExpenseValidationIssuesFromDraft(draft);
   const amountValidationText = buildAmountValidationText(draft.amountText, draft.currency);
   const rateHelp = buildRateHelpText(draft.currency, exchangeRates);
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -970,7 +1028,7 @@ function renderExpenseEditorModal() {
             <h2 class="modal-title">${draft.id ? "지출 수정" : "지출 추가"}</h2>
             <p class="modal-copy">반복 지출 수정은 특정 월 예외가 아니라 전체 규칙 수정입니다.</p>
           </div>
-          <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           ${
@@ -989,7 +1047,7 @@ function renderExpenseEditorModal() {
                   <div class="split-fields">
                     <div class="field-grid">
                       <label for="expense-source">카드/계좌</label>
-                      <select id="expense-source" name="sourceID">
+                      <select id="expense-source" name="sourceID" ${busy}>
                         ${state.snapshot.sources
                           .map(
                             (source) => `
@@ -1005,14 +1063,14 @@ function renderExpenseEditorModal() {
                     </div>
                     <div class="field-grid">
                       <label for="expense-description">설명</label>
-                      <input id="expense-description" name="description" value="${escapeAttr(draft.description)}" />
+                      <input id="expense-description" name="description" value="${escapeAttr(draft.description)}" ${busy} />
                     </div>
                   </div>
 
                   <div class="split-fields">
                     <div class="field-grid">
                       <label for="expense-currency">통화</label>
-                      <select id="expense-currency" name="currency">
+                      <select id="expense-currency" name="currency" ${busy}>
                         ${Object.entries(currencyMeta)
                           .map(
                             ([key, meta]) => `
@@ -1032,6 +1090,7 @@ function renderExpenseEditorModal() {
                         inputmode="${draft.currency === "usd" ? "decimal" : "numeric"}"
                         value="${escapeAttr(draft.amountText)}"
                         required
+                        ${busy}
                       />
                     </div>
                   </div>
@@ -1039,12 +1098,12 @@ function renderExpenseEditorModal() {
                   <div class="split-fields">
                     <div class="field-grid">
                       <label for="expense-date">지출 일자</label>
-                      <input id="expense-date" name="spentAt" type="date" value="${escapeAttr(draft.spentAt)}" required />
+                      <input id="expense-date" name="spentAt" type="date" value="${escapeAttr(draft.spentAt)}" required ${busy} />
                     </div>
                     <div class="field-grid">
                       <span class="form-section-title">반복 여부</span>
                       <label class="check-row">
-                        <input type="checkbox" name="isRecurring" ${draft.isRecurring ? "checked" : ""} />
+                        <input type="checkbox" name="isRecurring" ${draft.isRecurring ? "checked" : ""} ${busy} />
                         <span>매달 반복</span>
                       </label>
                     </div>
@@ -1062,12 +1121,13 @@ function renderExpenseEditorModal() {
                               type="month"
                               value="${escapeAttr(draft.recurrenceStartMonth)}"
                               required
+                              ${busy}
                             />
                           </div>
                           <div class="field-grid">
                             <span class="form-section-title">종료 월</span>
                             <label class="check-row">
-                              <input type="checkbox" name="hasEndMonth" ${draft.hasEndMonth ? "checked" : ""} />
+                              <input type="checkbox" name="hasEndMonth" ${draft.hasEndMonth ? "checked" : ""} ${busy} />
                               <span>종료 월 설정</span>
                             </label>
                             ${
@@ -1078,6 +1138,7 @@ function renderExpenseEditorModal() {
                                     type="month"
                                     value="${escapeAttr(draft.recurrenceEndMonth)}"
                                     required
+                                    ${busy}
                                   />
                                 `
                                 : ""
@@ -1125,8 +1186,8 @@ function renderExpenseEditorModal() {
                   }
 
                   <div class="form-actions">
-                    <button class="button-ghost" type="button" data-action="close-modal">취소</button>
-                    <button class="button-primary" type="submit">저장</button>
+                    <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
+                    <button class="button-primary" type="submit" ${busy}>저장</button>
                   </div>
                 </form>
               `
@@ -1139,7 +1200,7 @@ function renderExpenseEditorModal() {
 
 function renderConfirmModal() {
   const modal = state.modal;
-  const destructive = modal.type === "confirm-pull" && state.isDirty;
+  const busy = disabledAttr(isBusy());
 
   return `
     <div class="modal-backdrop">
@@ -1149,7 +1210,7 @@ function renderConfirmModal() {
             <h2 class="modal-title">${escapeHtml(modal.title)}</h2>
             <p class="modal-copy confirm-copy">${escapeHtml(modal.message)}</p>
           </div>
-          <button class="button-subtle" type="button" data-action="close-modal">닫기</button>
+          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
         <div class="modal-body">
           <form class="form-grid" data-form="confirm-action">
@@ -1170,8 +1231,8 @@ function renderConfirmModal() {
                 : ""
             }
             <div class="form-actions">
-              <button class="button-ghost" type="button" data-action="close-modal">취소</button>
-              <button class="${destructive || modal.destructive ? "button-danger" : "button-primary"}" type="submit">
+              <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
+              <button class="${modal.destructive ? "button-danger" : "button-primary"}" type="submit" ${busy}>
                 ${escapeHtml(modal.confirmLabel)}
               </button>
             </div>
@@ -1182,36 +1243,65 @@ function renderConfirmModal() {
   `;
 }
 
-function statusSummary() {
+function statusDescriptor() {
   if (state.isSyncing) {
-    return "GitHub에 동기화하는 중";
+    return {
+      tone: "progress",
+      summary: "변경 사항을 GitHub에 저장하는 중입니다.",
+      detail: "저장이 끝나면 브라우저와 GitHub JSON이 다시 일치합니다.",
+      badges: [{ label: "자동 저장 중", className: "badge-success" }],
+    };
   }
 
   if (state.isBootstrapping) {
-    return "GitHub에서 최신 데이터를 불러오는 중";
+    return {
+      tone: "progress",
+      summary: "GitHub에서 최신 데이터를 확인하는 중입니다.",
+      detail: "잠금 해제 후 저장소 연결과 최신 remote snapshot을 다시 확인하고 있습니다.",
+      badges: [{ label: "연결 확인 중" }],
+    };
   }
 
-  if (!isGitHubConfigValid(state.settings.gitHubConfig)) {
-    return "GitHub 연결을 설정하세요.";
+  if (!hasStoredConnection()) {
+    return {
+      tone: "neutral",
+      summary: "GitHub 연결을 설정하세요.",
+      detail: "토큰과 저장소를 저장하면 최신 remote 확인과 자동 저장을 사용할 수 있습니다.",
+      badges: [],
+    };
   }
 
-  if (!state.sessionToken) {
-    return "저장된 GitHub 토큰 잠금 해제가 필요합니다.";
+  if (isConnectionLocked()) {
+    return {
+      tone: "danger",
+      summary: "토큰이 잠겨 있어 현재 내역은 조회 전용입니다.",
+      detail: state.settings.lastFetchedAt
+        ? `마지막 remote 확인: ${formatDateTimeLabel(state.settings.lastFetchedAt)}. 잠금 해제하면 최신 변경을 다시 불러오고 자동 저장을 다시 켤 수 있습니다.`
+        : "잠금 해제하면 최신 변경을 다시 불러오고 수정 및 자동 저장을 다시 켤 수 있습니다.",
+      badges: [
+        { label: "조회 전용", className: "badge-danger" },
+        { label: "잠금 해제 필요" },
+      ],
+    };
   }
 
-  if (state.isDirty) {
-    return "로컬 변경 사항이 아직 동기화되지 않았습니다.";
-  }
-
-  if (state.settings.lastSyncedAt) {
-    return `마지막 동기화: ${formatDateTimeLabel(state.settings.lastSyncedAt)}`;
-  }
-
+  const details = [];
   if (state.settings.lastFetchedAt) {
-    return `마지막 불러오기: ${formatDateTimeLabel(state.settings.lastFetchedAt)}`;
+    details.push(`마지막 remote 확인: ${formatDateTimeLabel(state.settings.lastFetchedAt)}`);
   }
-
-  return "GitHub 연결이 준비되었습니다.";
+  if (state.settings.lastSyncedAt) {
+    details.push(`마지막 자동 저장: ${formatDateTimeLabel(state.settings.lastSyncedAt)}`);
+  }
+  return {
+    tone: "success",
+    summary: "GitHub 연결이 준비되었습니다.",
+    detail:
+      details.join(" · ") || "변경 사항은 저장할 때마다 GitHub JSON에 즉시 반영됩니다.",
+    badges: [
+      { label: "자동 저장 활성", className: "badge-success" },
+      { label: "토큰 잠금 해제됨" },
+    ],
+  };
 }
 
 function handleClick(event) {
@@ -1221,6 +1311,24 @@ function handleClick(event) {
   }
 
   const action = button.dataset.action;
+  const editActions = new Set([
+    "open-sources",
+    "add-source",
+    "edit-source",
+    "delete-source",
+    "open-add-month",
+    "open-add-expense",
+    "open-rates",
+    "edit-expense",
+    "delete-expense",
+    "delete-month",
+  ]);
+
+  if (editActions.has(action) && !canEditSnapshot()) {
+    state.errorMessage = lockedMutationMessage();
+    render();
+    return;
+  }
 
   if (action === "open-settings") {
     openModal("settings");
@@ -1228,7 +1336,6 @@ function handleClick(event) {
     openModal("unlock");
   } else if (action === "lock-session") {
     state.sessionToken = null;
-    openModal("unlock");
     render();
   } else if (action === "open-sources") {
     openModal("sources");
@@ -1278,22 +1385,6 @@ function handleClick(event) {
     });
   } else if (action === "open-rates") {
     openModal("rates");
-  } else if (action === "open-pull-confirm") {
-    openModal("confirm-pull", {
-      title: "GitHub에서 다시 불러올까요?",
-      message: state.isDirty
-        ? "GitHub의 최신 데이터를 불러와 로컬 데이터를 교체합니다.\n아직 Sync하지 않은 로컬 변경 사항은 사라집니다."
-        : "GitHub의 최신 데이터를 불러와 로컬 데이터를 교체합니다.",
-      confirmLabel: "다시 불러오기",
-      destructive: state.isDirty,
-    });
-  } else if (action === "open-sync-confirm") {
-    openModal("confirm-sync", {
-      title: "GitHub에 Sync할까요?",
-      message: "현재 로컬 전체 상태를 GitHub JSON 파일 하나로 업로드합니다.",
-      confirmLabel: "Sync",
-      destructive: false,
-    });
   } else if (action === "select-month") {
     state.selectedMonthKey = button.dataset.monthKey ?? state.selectedMonthKey;
     normalizeSelection();
@@ -1410,7 +1501,7 @@ function handleChange(event) {
 }
 
 function handleKeyDown(event) {
-  if (event.key === "Escape" && state.modal) {
+  if (event.key === "Escape" && state.modal && !isBusy()) {
     closeModal();
   }
 }
@@ -1423,11 +1514,17 @@ async function saveSettings(form, closeOnSuccess) {
     branch: formData.get("branch"),
     filePath: formData.get("filePath"),
   });
+  const currentConfig = trimmedGitHubConfig(state.settings.gitHubConfig);
+  const configChanged = !gitHubConfigEquals(currentConfig, gitHubConfig);
   const token = String(formData.get("token") ?? "").trim();
   const passphrase = String(formData.get("passphrase") ?? "").trim();
 
   if (!isGitHubConfigValid(gitHubConfig)) {
     throw new Error("GitHub 저장소 설정을 모두 입력하세요.");
+  }
+
+  if (configChanged && isConnectionLocked()) {
+    throw new Error("저장소 경로 변경은 잠금 해제 후에만 저장할 수 있습니다.");
   }
 
   if (!state.tokenEnvelope && !token) {
@@ -1438,30 +1535,43 @@ async function saveSettings(form, closeOnSuccess) {
     throw new Error("새 토큰을 암호화 저장하려면 passphrase가 필요합니다.");
   }
 
-  state.settings = {
-    ...state.settings,
-    gitHubConfig,
-  };
+  const nextTokenEnvelope = token ? await encryptToken(token, passphrase) : state.tokenEnvelope;
+  const sessionToken = token ? token : state.sessionToken;
 
-  if (token) {
-    state.tokenEnvelope = await encryptToken(token, passphrase);
-    await persistTokenEnvelope(state.tokenEnvelope);
-    state.sessionToken = token;
+  if (!sessionToken) {
+    if (closeOnSuccess) {
+      closeModal();
+    } else {
+      render();
+    }
+    return;
   }
 
-  await persistSettings(state.settings);
-  normalizeSelection();
-
-  if (closeOnSuccess) {
-    closeModal(false);
-  }
-
+  state.isBootstrapping = true;
+  clearError();
   render();
 
-  if (state.sessionToken) {
-    await bootstrapFromRemote();
-  } else if (state.tokenEnvelope) {
-    openModal("unlock");
+  try {
+    const envelope = await fetchSnapshot(gitHubConfig, sessionToken);
+    state.tokenEnvelope = nextTokenEnvelope;
+    state.sessionToken = sessionToken;
+    applyFetchedSnapshot(envelope, {
+      gitHubConfig,
+      lastSyncedAt: configChanged ? null : state.settings.lastSyncedAt,
+    });
+
+    if (token) {
+      await persistTokenEnvelope(state.tokenEnvelope);
+    }
+    await persistSnapshot(state.snapshot);
+    await persistSettings(state.settings);
+
+    if (closeOnSuccess) {
+      closeModal(false);
+    }
+  } finally {
+    state.isBootstrapping = false;
+    render();
   }
 }
 
@@ -1478,10 +1588,11 @@ async function unlockSession(form) {
   state.sessionToken = await decryptToken(state.tokenEnvelope, passphrase);
   closeModal(false);
   render();
-  await bootstrapFromRemote();
+  await bootstrapFromRemote({ lockOnFailure: true });
 }
 
 async function saveSource(form) {
+  assertEditableSnapshot();
   const formData = new FormData(form);
   const id = String(formData.get("id") ?? "").trim();
   const kind = String(formData.get("kind") ?? "card");
@@ -1502,6 +1613,7 @@ async function saveSource(form) {
 }
 
 async function saveMonth(form) {
+  assertEditableSnapshot();
   const monthValue = String(new FormData(form).get("month") ?? "").trim();
   const month = parseDateInputToYearMonth(monthValue);
   const exists = months().some((entry) => yearMonthKey(entry) === yearMonthKey(month));
@@ -1515,6 +1627,7 @@ async function saveMonth(form) {
 }
 
 async function saveRates(form) {
+  assertEditableSnapshot();
   const formData = new FormData(form);
   const usdToKRWPer1 = Number.parseInt(String(formData.get("usdToKRWPer1") ?? "").replace(/,/g, ""), 10);
   const jpyToKRWPer100 = Number.parseInt(
@@ -1536,6 +1649,7 @@ async function saveRates(form) {
 }
 
 async function saveExpense(form) {
+  assertEditableSnapshot();
   const draft = readExpenseDraftFromForm(form);
   const sourceID = Number.parseInt(String(draft.sourceID), 10);
   const amountMinorUnits = parseMinorUnits(draft.amountText, draft.currency);
@@ -1576,22 +1690,9 @@ async function saveExpense(form) {
 }
 
 async function performConfirm(form) {
+  assertEditableSnapshot();
   const formData = new FormData(form);
   const confirmType = String(formData.get("confirmType"));
-
-  if (confirmType === "confirm-pull") {
-    closeModal(false);
-    render();
-    await bootstrapFromRemote();
-    return;
-  }
-
-  if (confirmType === "confirm-sync") {
-    closeModal(false);
-    render();
-    await syncToRemote();
-    return;
-  }
 
   if (confirmType === "confirm-delete-source") {
     await commitSnapshot(deleteSource(state.snapshot, Number(formData.get("sourceId"))));
@@ -1612,7 +1713,9 @@ async function performConfirm(form) {
   }
 }
 
-async function bootstrapFromRemote() {
+async function bootstrapFromRemote(options = {}) {
+  const { lockOnFailure = false } = options;
+
   if (!canRunRemoteAction()) {
     return;
   }
@@ -1623,25 +1726,23 @@ async function bootstrapFromRemote() {
 
   try {
     const envelope = await fetchSnapshot(state.settings.gitHubConfig, state.sessionToken);
-    state.snapshot = envelope.snapshot;
-    state.settings.remoteSHA = envelope.sha;
-    state.settings.lastFetchedAt = new Date().toISOString();
-    state.isDirty = false;
+    applyFetchedSnapshot(envelope);
     await persistSnapshot(state.snapshot);
     await persistSettings(state.settings);
-    normalizeSelection();
   } catch (error) {
-    state.errorMessage = error instanceof Error ? error.message : "GitHub에서 데이터를 불러오지 못했습니다.";
+    if (lockOnFailure) {
+      state.sessionToken = null;
+    }
+    throw error instanceof Error ? error : new Error("GitHub에서 데이터를 불러오지 못했습니다.");
   } finally {
     state.isBootstrapping = false;
     render();
   }
 }
 
-async function syncToRemote() {
-  if (!canRunRemoteAction()) {
-    return;
-  }
+async function commitSnapshot(nextSnapshot) {
+  assertEditableSnapshot();
+  const normalizedSnapshot = normalizeSnapshot(nextSnapshot);
 
   state.isSyncing = true;
   clearError();
@@ -1651,35 +1752,28 @@ async function syncToRemote() {
     const nextSHA = await pushSnapshot(
       state.settings.gitHubConfig,
       state.sessionToken,
-      state.snapshot,
+      normalizedSnapshot,
       state.settings.remoteSHA
     );
-    state.settings.remoteSHA = nextSHA;
-    state.settings.lastSyncedAt = new Date().toISOString();
-    state.isDirty = false;
+    state.snapshot = normalizedSnapshot;
+    state.settings = {
+      ...state.settings,
+      remoteSHA: nextSHA,
+      lastSyncedAt: new Date().toISOString(),
+    };
+    await persistSnapshot(state.snapshot);
     await persistSettings(state.settings);
+    normalizeSelection();
   } catch (error) {
-    state.errorMessage = error instanceof Error ? error.message : "GitHub에 동기화하지 못했습니다.";
+    throw error instanceof Error ? error : new Error("GitHub에 저장하지 못했습니다.");
   } finally {
     state.isSyncing = false;
     render();
   }
 }
 
-async function commitSnapshot(nextSnapshot) {
-  state.snapshot = normalizeSnapshot(nextSnapshot);
-  state.isDirty = true;
-  await persistSnapshot(state.snapshot);
-  normalizeSelection();
-  render();
-}
-
 function openModal(type, payload = {}) {
-  if (type === "confirm-pull" || type === "confirm-sync" || type === "confirm-delete-source" || type === "confirm-delete-expense" || type === "confirm-delete-month") {
-    state.modal = { type, ...payload };
-  } else {
-    state.modal = { type, ...payload };
-  }
+  state.modal = { type, ...payload };
   render();
 }
 
@@ -1915,7 +2009,7 @@ function createLedgerIllustration() {
   context.font = "500 20px Inter, sans-serif";
   context.fillText("총 지출", 720, 174);
   context.fillText("선택 source", 720, 286);
-  context.fillText("마지막 Sync 준비", 670, 392);
+  context.fillText("자동 저장 활성", 690, 392);
 
   return canvas.toDataURL("image/png");
 }
