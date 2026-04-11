@@ -455,12 +455,13 @@ export function totalAmountForMonth(month, snapshot) {
 export function occurrencesForMonth(month, sourceID, snapshot) {
   const normalizedMonth = normalizeYearMonth(month);
   return snapshot.expenses
-    .filter((expense) => expense.sourceID === sourceID)
+    .filter((expense) => sourceID == null || expense.sourceID === sourceID)
     .map((expense) => ({
       expense,
+      source: sourceById(snapshot, expense.sourceID),
       displayDate: materializedDisplayDate(expense, normalizedMonth),
     }))
-    .filter((entry) => entry.displayDate != null)
+    .filter((entry) => entry.source != null && entry.displayDate != null)
     .sort((left, right) => right.displayDate.getTime() - left.displayDate.getTime());
 }
 

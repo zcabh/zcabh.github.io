@@ -159,7 +159,7 @@ function currentTotals() {
 
 function currentOccurrences() {
   const month = currentMonth();
-  if (!month || state.selectedSourceId == null) {
+  if (!month) {
     return [];
   }
   return occurrencesForMonth(month, state.selectedSourceId, state.snapshot);
@@ -256,6 +256,7 @@ function renderDashboard() {
   const source = selectedSource();
   const occurrences = currentOccurrences();
   const totalAmount = month ? totalAmountForMonth(month, state.snapshot) : 0;
+  const todayDateKey = toDateInputValue(new Date());
 
   return `
     <div class="app-frame">
@@ -408,13 +409,13 @@ function renderDashboard() {
                 <div class="panel-head">
                   <div>
                     <div class="form-section-title">
-                      ${source ? escapeHtml(source.name) : "상세 지출 선택"}
+                      ${source ? escapeHtml(source.name) : "전체 지출 내역"}
                     </div>
                     <div class="muted">
                       ${
                         source
                           ? `${yearMonthTitle(month)}의 지출을 최신순으로 표시합니다.`
-                          : `${yearMonthTitle(month)}에서 source를 선택하면 상세 지출이 열립니다.`
+                          : `${yearMonthTitle(month)}의 전체 지출을 최신순으로 표시합니다.`
                       }
                     </div>
                   </div>
@@ -434,21 +435,16 @@ function renderDashboard() {
                 </div>
                 <div class="panel-body">
                   ${
-                    !source
-                      ? `
-                        <section class="empty-state">
-                          <div class="empty-state-copy">
-                            <h2 class="modal-title">상세 지출 선택</h2>
-                            <p class="muted">카드 또는 계좌 카드를 탭하면 해당 월의 지출이 열립니다.</p>
-                          </div>
-                        </section>
-                      `
-                      : occurrences.length === 0
+                    occurrences.length === 0
                         ? `
                           <section class="empty-state">
                             <div class="empty-state-copy">
-                              <h2 class="modal-title">해당 source의 지출이 없습니다</h2>
-                              <p class="muted">선택한 월과 source 조합에는 표시할 항목이 아직 없습니다.</p>
+                              <h2 class="modal-title">표시할 지출이 없습니다</h2>
+                              <p class="muted">${
+                                source
+                                  ? "선택한 월과 source 조합에는 표시할 항목이 아직 없습니다."
+                                  : "이 월에는 입력된 지출이 아직 없습니다."
+                              }</p>
                             </div>
                           </section>
                         `
@@ -457,7 +453,11 @@ function renderDashboard() {
                             ${occurrences
                               .map(
                                 (entry) => `
-                                  <article class="expense-row">
+                                  <article class="expense-row ${
+                                    toDateInputValue(entry.displayDate) > todayDateKey
+                                      ? "expense-row-future"
+                                      : "expense-row-current-or-past"
+                                  }">
                                     <div class="expense-main">
                                       <div class="stack">
                                         <div class="expense-title">${
@@ -465,6 +465,11 @@ function renderDashboard() {
                                         }</div>
                                         <div class="expense-meta">
                                           <span>${formatDateLabel(entry.displayDate)}</span>
+                                          <span>
+                                            ${escapeHtml(entry.source.name)} · ${
+                                              sourceKindMeta[entry.source.kind].title
+                                            }
+                                          </span>
                                           <span>${entry.expense.recurrence ? "반복 지출" : "일회성"}</span>
                                           <span>${currencyMeta[entry.expense.currency].code}</span>
                                         </div>
@@ -1294,7 +1299,8 @@ function handleClick(event) {
     normalizeSelection();
     render();
   } else if (action === "select-source") {
-    state.selectedSourceId = Number(button.dataset.sourceId);
+    const nextSourceId = Number(button.dataset.sourceId);
+    state.selectedSourceId = state.selectedSourceId === nextSourceId ? null : nextSourceId;
     render();
   } else if (action === "edit-expense") {
     const expense = findExpense(button.dataset.expenseId);
@@ -1699,7 +1705,12 @@ function findExpense(expenseID) {
 function defaultExpenseDraft() {
   const selectedMonth = currentMonth() ?? months()[months().length - 1] ?? yearMonthFromDate(new Date());
   const selectedSourceId = state.selectedSourceId ?? state.snapshot.sources[0]?.id ?? "";
-  const baseDate = firstDateOfYearMonth(selectedMonth);
+  const today = new Date();
+  const todayMonthKey = yearMonthKey(yearMonthFromDate(today));
+  const hasTodayMonthPage = state.snapshot.monthPages.some(
+    (entry) => yearMonthKey(entry.yearMonth) === todayMonthKey
+  );
+  const baseDate = hasTodayMonthPage ? today : firstDateOfYearMonth(selectedMonth);
 
   return {
     id: "",

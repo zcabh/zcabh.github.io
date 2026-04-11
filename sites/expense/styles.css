@@ -311,6 +311,16 @@ button:disabled {
   gap: 10px;
 }
 
+.expense-row-future {
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
+.expense-row-current-or-past {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+}
+
 .expense-main,
 .source-list-head {
   display: flex;
