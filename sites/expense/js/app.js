@@ -55,6 +55,23 @@ import {
 } from "./storage.js";
 
 const root = document.querySelector("#app");
+const expenseKindFilterMeta = {
+  all: {
+    label: "전체",
+    summaryTitle: "전체 지출",
+    listTitle: "전체 지출 내역",
+  },
+  recurring: {
+    label: "정기",
+    summaryTitle: "정기 지출",
+    listTitle: "정기 지출 내역",
+  },
+  oneOff: {
+    label: "일회성",
+    summaryTitle: "일회성 지출",
+    listTitle: "일회성 지출 내역",
+  },
+};
 
 const state = {
   snapshot: emptySnapshot(),
@@ -66,6 +83,7 @@ const state = {
   errorMessage: "",
   selectedMonthKey: null,
   selectedSourceId: null,
+  selectedExpenseKindFilter: "all",
   modal: null,
   illustrationDataUrl: "",
 };
@@ -156,7 +174,7 @@ function months() {
 
 function currentTotals() {
   const month = currentMonth();
-  return month ? totalsForMonth(month, state.snapshot) : [];
+  return month ? totalsForMonth(month, state.snapshot, state.selectedExpenseKindFilter) : [];
 }
 
 function currentOccurrences() {
@@ -164,7 +182,12 @@ function currentOccurrences() {
   if (!month) {
     return [];
   }
-  return occurrencesForMonth(month, state.selectedSourceId, state.snapshot);
+  return occurrencesForMonth(
+    month,
+    state.selectedSourceId,
+    state.snapshot,
+    state.selectedExpenseKindFilter
+  );
 }
 
 function selectedSource() {
@@ -245,6 +268,14 @@ function normalizeSelection() {
   }
 }
 
+function currentExpenseKindFilterMeta() {
+  return expenseKindFilterMeta[state.selectedExpenseKindFilter] ?? expenseKindFilterMeta.all;
+}
+
+function isExpenseKindFilter(value) {
+  return Boolean(expenseKindFilterMeta[value]);
+}
+
 function render() {
   if (requiresOnboarding()) {
     root.innerHTML = renderOnboarding();
@@ -301,7 +332,10 @@ function renderDashboard() {
   const totals = currentTotals();
   const source = selectedSource();
   const occurrences = currentOccurrences();
-  const totalAmount = month ? totalAmountForMonth(month, state.snapshot) : 0;
+  const filterMeta = currentExpenseKindFilterMeta();
+  const totalAmount = month
+    ? totalAmountForMonth(month, state.snapshot, state.selectedExpenseKindFilter)
+    : 0;
   const todayDateKey = toDateInputValue(new Date());
   const editable = canEditSnapshot();
   const busy = disabledAttr(isBusy());
@@ -378,10 +412,15 @@ function renderDashboard() {
 
               <section class="panel">
                 <div class="panel-head">
-                  <div class="summary-block">
-                    <div class="form-section-title">${yearMonthTitle(month)}</div>
-                    <p class="summary-amount">${formatAmount(totalAmount, "krw")}</p>
-                    <div class="muted">월 bar는 source별 월 합계를 기준으로 계산합니다.</div>
+                  <div class="summary-panel-head">
+                    <div class="summary-block">
+                      <div class="form-section-title">${yearMonthTitle(month)}</div>
+                      <p class="summary-amount">${formatAmount(totalAmount, "krw")}</p>
+                      <div class="muted">
+                        월 bar는 ${filterMeta.summaryTitle}의 source별 월 합계를 기준으로 계산합니다.
+                      </div>
+                    </div>
+                    ${renderExpenseKindFilterControl()}
                   </div>
                   <button
                     class="button-danger"
@@ -400,7 +439,7 @@ function renderDashboard() {
                         <section class="empty-state">
                           <div class="empty-state-copy">
                             <h2 class="modal-title">표시할 지출이 없습니다</h2>
-                            <p class="muted">이 월에는 입력된 지출이 아직 없습니다.</p>
+                            <p class="muted">${escapeHtml(buildTotalsEmptyMessage(month))}</p>
                           </div>
                         </section>
                       `
@@ -442,13 +481,13 @@ function renderDashboard() {
                 <div class="panel-head">
                   <div>
                     <div class="form-section-title">
-                      ${source ? escapeHtml(source.name) : "전체 지출 내역"}
+                      ${source ? escapeHtml(source.name) : filterMeta.listTitle}
                     </div>
                     <div class="muted">
                       ${
                         source
-                          ? `${yearMonthTitle(month)}의 지출을 최신순으로 표시합니다.`
-                          : `${yearMonthTitle(month)}의 전체 지출을 최신순으로 표시합니다.`
+                          ? `${yearMonthTitle(month)}에서 선택한 source의 ${filterMeta.summaryTitle}을 최신순으로 표시합니다.`
+                          : `${yearMonthTitle(month)}의 ${filterMeta.summaryTitle}을 최신순으로 표시합니다.`
                       }
                     </div>
                   </div>
@@ -474,11 +513,7 @@ function renderDashboard() {
                           <section class="empty-state">
                             <div class="empty-state-copy">
                               <h2 class="modal-title">표시할 지출이 없습니다</h2>
-                              <p class="muted">${
-                                source
-                                  ? "선택한 월과 source 조합에는 표시할 항목이 아직 없습니다."
-                                  : "이 월에는 입력된 지출이 아직 없습니다."
-                              }</p>
+                              <p class="muted">${escapeHtml(buildOccurrencesEmptyMessage(month, source))}</p>
                             </div>
                           </section>
                         `
@@ -558,6 +593,50 @@ function renderDashboard() {
       ${renderModal()}
     </div>
   `;
+}
+
+function renderExpenseKindFilterControl() {
+  return `
+    <div class="segmented-control" role="group" aria-label="지출 유형 필터">
+      ${Object.entries(expenseKindFilterMeta)
+        .map(
+          ([filter, meta]) => `
+            <button
+              class="segmented-control-button ${
+                state.selectedExpenseKindFilter === filter ? "is-selected" : ""
+              }"
+              type="button"
+              data-action="select-expense-kind-filter"
+              data-filter-kind="${filter}"
+              aria-pressed="${state.selectedExpenseKindFilter === filter}"
+            >
+              ${meta.label}
+            </button>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function buildTotalsEmptyMessage(month) {
+  if (state.selectedExpenseKindFilter === "all") {
+    return "이 월에는 입력된 지출이 아직 없습니다.";
+  }
+
+  return `${yearMonthTitle(month)}에는 ${currentExpenseKindFilterMeta().summaryTitle}이 아직 없습니다.`;
+}
+
+function buildOccurrencesEmptyMessage(month, source) {
+  if (source) {
+    if (state.selectedExpenseKindFilter === "all") {
+      return "선택한 월과 source 조합에는 표시할 항목이 아직 없습니다.";
+    }
+
+    return `선택한 월과 source 조합에는 ${currentExpenseKindFilterMeta().summaryTitle} 항목이 아직 없습니다.`;
+  }
+
+  return buildTotalsEmptyMessage(month);
 }
 
 function renderStatusBar() {
@@ -1334,6 +1413,14 @@ function handleClick(event) {
     openModal("settings");
   } else if (action === "open-unlock") {
     openModal("unlock");
+  } else if (action === "select-expense-kind-filter") {
+    const nextFilter = String(button.dataset.filterKind ?? "all");
+    if (!isExpenseKindFilter(nextFilter)) {
+      return;
+    }
+    state.selectedExpenseKindFilter = nextFilter;
+    normalizeSelection();
+    render();
   } else if (action === "lock-session") {
     state.sessionToken = null;
     render();

@@ -414,13 +414,24 @@ export function issueMessage(issue) {
   return `반복 종료 월은 생성된 월이어야 합니다. ${title} 페이지를 먼저 추가하세요.`;
 }
 
-export function totalsForMonth(month, snapshot) {
+export function matchesExpenseKindFilter(expense, filter = "all") {
+  const normalizedFilter = normalizeExpenseKindFilter(filter);
+
+  if (normalizedFilter === "all") {
+    return true;
+  }
+
+  const isRecurring = Boolean(expense.recurrence);
+  return normalizedFilter === "recurring" ? isRecurring : !isRecurring;
+}
+
+export function totalsForMonth(month, snapshot, filter = "all") {
   const normalizedMonth = normalizeYearMonth(month);
   const exchangeRates = snapshot.exchangeRates ?? emptyExchangeRates();
   const totalsBySource = new Map();
 
   for (const expense of snapshot.expenses) {
-    if (!expenseOccursInMonth(expense, normalizedMonth)) {
+    if (!matchesExpenseKindFilter(expense, filter) || !expenseOccursInMonth(expense, normalizedMonth)) {
       continue;
     }
 
@@ -442,20 +453,24 @@ export function totalsForMonth(month, snapshot) {
     .filter((entry) => entry.total > 0);
 }
 
-export function totalAmountForMonth(month, snapshot) {
+export function totalAmountForMonth(month, snapshot, filter = "all") {
   const exchangeRates = snapshot.exchangeRates ?? emptyExchangeRates();
   return snapshot.expenses.reduce((runningTotal, expense) => {
-    if (!expenseOccursInMonth(expense, month)) {
+    if (!matchesExpenseKindFilter(expense, filter) || !expenseOccursInMonth(expense, month)) {
       return runningTotal;
     }
     return runningTotal + (amountInKRW(expense, exchangeRates) ?? 0);
   }, 0);
 }
 
-export function occurrencesForMonth(month, sourceID, snapshot) {
+export function occurrencesForMonth(month, sourceID, snapshot, filter = "all") {
   const normalizedMonth = normalizeYearMonth(month);
   return snapshot.expenses
-    .filter((expense) => sourceID == null || expense.sourceID === sourceID)
+    .filter(
+      (expense) =>
+        matchesExpenseKindFilter(expense, filter) &&
+        (sourceID == null || expense.sourceID === sourceID)
+    )
     .map((expense) => ({
       expense,
       source: sourceById(snapshot, expense.sourceID),
@@ -492,6 +507,10 @@ export function materializedDisplayDate(expense, month) {
   }
 
   return materializeDate(normalizeYearMonth(month), expense.spentAt);
+}
+
+function normalizeExpenseKindFilter(filter) {
+  return filter === "recurring" || filter === "oneOff" ? filter : "all";
 }
 
 export function amountInKRW(expense, exchangeRates) {
