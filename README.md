@@ -2,7 +2,7 @@
 
 GitHub Pages로 공개하는 정적 사이트 저장소입니다.
 
-현재는 개인 지출 관리 웹 앱 하나를 `/expense/` 경로로 운영하고, 루트 `/`는 공개된 페이지 목록을 보여주는 포털로 사용합니다. 이후 새 페이지를 추가할 때도 같은 규칙으로 확장할 수 있게 구성했습니다.
+현재는 개인 지출 관리(`/expense/`)와 유통기한 관리(`/pantry/`) 웹 앱을 운영하고, 루트 `/`는 공개된 페이지 목록을 보여주는 포털로 사용합니다. 이후 새 페이지를 추가할 때도 같은 규칙으로 확장할 수 있게 구성했습니다.
 
 ## Structure
 
@@ -17,7 +17,12 @@ GitHub Pages로 공개하는 정적 사이트 저장소입니다.
 │   ├── build-pages.mjs
 │   └── validate-pages.mjs
 ├── sites/
-│   └── expense/
+│   ├── expense/
+│   │   ├── index.html
+│   │   ├── js/
+│   │   ├── site.json
+│   │   └── styles.css
+│   └── pantry/
 │       ├── index.html
 │       ├── js/
 │       ├── site.json
