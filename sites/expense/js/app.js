@@ -45,13 +45,13 @@ import {
   yearMonthTitle,
   currencyMeta,
 } from "./domain.js";
-import { decryptToken, encryptToken } from "./crypto.js";
 import { fetchSnapshot, pushSnapshot } from "./github.js";
 import {
+  clearLegacyTokenEnvelope,
   loadPersistedState,
+  persistToken,
   persistSettings,
   persistSnapshot,
-  persistTokenEnvelope,
 } from "./storage.js";
 
 const root = document.querySelector("#app");
@@ -76,8 +76,8 @@ const expenseKindFilterMeta = {
 const state = {
   snapshot: emptySnapshot(),
   settings: defaultSettings(),
-  tokenEnvelope: null,
-  sessionToken: null,
+  token: null,
+  hasLegacyTokenEnvelope: false,
   isBootstrapping: false,
   isSyncing: false,
   errorMessage: "",
@@ -101,7 +101,8 @@ async function initialize() {
   try {
     const persisted = await loadPersistedState();
     state.settings = mergeSettings(persisted.settings);
-    state.tokenEnvelope = persisted.tokenEnvelope ?? null;
+    state.token = persisted.token ?? null;
+    state.hasLegacyTokenEnvelope = Boolean(persisted.hasLegacyTokenEnvelope);
 
     if (persisted.snapshot) {
       state.snapshot = normalizeSnapshot(persisted.snapshot);
@@ -111,11 +112,19 @@ async function initialize() {
     state.errorMessage = "저장된 로컬 데이터를 읽지 못했습니다. 빈 상태로 시작합니다.";
     state.snapshot = emptySnapshot();
     state.settings = defaultSettings();
-    state.tokenEnvelope = null;
+    state.token = null;
+    state.hasLegacyTokenEnvelope = false;
   }
 
   normalizeSelection();
   render();
+
+  if (hasStoredConnection()) {
+    void bootstrapFromRemote().catch((error) => {
+      state.errorMessage = error instanceof Error ? error.message : "GitHub에서 데이터를 불러오지 못했습니다.";
+      render();
+    });
+  }
 }
 
 function defaultSettings() {
@@ -149,19 +158,19 @@ function mergeSettings(value) {
 }
 
 function hasStoredConnection() {
-  return isGitHubConfigValid(state.settings.gitHubConfig) && Boolean(state.tokenEnvelope);
+  return isGitHubConfigValid(state.settings.gitHubConfig) && Boolean(state.token);
+}
+
+function hasLegacyTokenMigrationPending() {
+  return !state.token && state.hasLegacyTokenEnvelope;
 }
 
 function isBusy() {
   return state.isBootstrapping || state.isSyncing;
 }
 
-function isConnectionLocked() {
-  return hasStoredConnection() && !state.sessionToken;
-}
-
 function requiresOnboarding() {
-  return !isGitHubConfigValid(state.settings.gitHubConfig) || !state.tokenEnvelope;
+  return !isGitHubConfigValid(state.settings.gitHubConfig) || (!state.token && !state.hasLegacyTokenEnvelope);
 }
 
 function currentMonth() {
@@ -200,7 +209,7 @@ function selectedSource() {
 function canRunRemoteAction() {
   return Boolean(
     isGitHubConfigValid(state.settings.gitHubConfig) &&
-      state.sessionToken &&
+      state.token &&
       !isBusy()
   );
 }
@@ -214,10 +223,13 @@ function disabledAttr(disabled) {
 }
 
 function lockedMutationMessage() {
-  if (state.sessionToken) {
+  if (isBusy()) {
     return "GitHub 작업이 끝난 뒤 다시 시도하세요.";
   }
-  return "잠금 해제 후 수정할 수 있습니다.";
+  if (hasLegacyTokenMigrationPending()) {
+    return "보안 방식 변경으로 GitHub token을 한 번 다시 입력해야 수정할 수 있습니다.";
+  }
+  return "GitHub 연결을 먼저 설정하세요.";
 }
 
 function assertEditableSnapshot() {
@@ -307,14 +319,13 @@ function renderOnboarding() {
           <div class="stack">
             <div class="badge badge-success">정적 호스팅 가능</div>
             <div class="muted">public web repo + private data repo 조합을 기준으로 설계했습니다.</div>
-            <div class="muted">토큰은 브라우저에 암호화 저장되고, 잠금 해제 후 최신 remote를 다시 확인합니다.</div>
+            <div class="muted">입력한 GitHub PAT는 이 브라우저에 저장되어 이후 재입력 없이 바로 사용합니다.</div>
           </div>
         </div>
         <div class="onboarding-form-wrap">
           <form class="form-grid" data-form="settings-onboarding">
             ${renderSettingsFields(config, {
               tokenValue: "",
-              passphraseValue: "",
               showTokenFields,
               showCloseButton: false,
               isOnboarding: true,
@@ -346,17 +357,11 @@ function renderDashboard() {
         <div class="brand-block">
           <h1 class="brand-title">Track Your Expense Web</h1>
           <p class="brand-copy">
-            잠금 해제하면 GitHub의 최신 JSON을 다시 읽고, 이후 변경 사항은 저장할 때마다 GitHub에 즉시 반영합니다.
-            잠긴 상태에서는 현재 로컬 내역만 조회할 수 있습니다.
+            저장된 GitHub PAT로 최신 JSON을 다시 확인하고, 이후 변경 사항은 저장할 때마다 GitHub에 즉시 반영합니다.
           </p>
         </div>
         <div class="header-actions">
           <button class="button-ghost" type="button" data-action="open-settings" ${busy}>GitHub 설정</button>
-          ${
-            state.sessionToken
-              ? `<button class="button-ghost" type="button" data-action="lock-session" ${busy}>잠금</button>`
-              : `<button class="button-primary" type="button" data-action="open-unlock" ${busy}>잠금 해제</button>`
-          }
         </div>
       </div>
 
@@ -691,10 +696,6 @@ function renderModal() {
     return "";
   }
 
-  if (state.modal.type === "unlock") {
-    return renderUnlockModal();
-  }
-
   if (state.modal.type === "settings") {
     return renderSettingsModal();
   }
@@ -722,39 +723,6 @@ function renderModal() {
   return renderConfirmModal();
 }
 
-function renderUnlockModal() {
-  const busy = disabledAttr(isBusy());
-
-  return `
-    <div class="modal-backdrop">
-      <section class="modal">
-        <div class="modal-head">
-          <div>
-            <h2 class="modal-title">토큰 잠금 해제</h2>
-            <p class="modal-copy">
-              저장된 GitHub 토큰은 브라우저에 암호화되어 있습니다. passphrase를 입력하면 최신 remote snapshot을 다시 확인하고 수정 기능을 다시 켭니다.
-            </p>
-          </div>
-          <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
-        </div>
-        <div class="modal-body">
-          <form class="form-grid" data-form="unlock">
-            <div class="field-grid">
-              <label for="unlock-passphrase">Passphrase</label>
-              <input id="unlock-passphrase" name="passphrase" type="password" autocomplete="current-password" required ${busy} />
-              <small class="form-note">잠긴 상태에서는 현재 로컬 내역만 조회할 수 있습니다.</small>
-            </div>
-            <div class="form-actions">
-              <button class="button-ghost" type="button" data-action="close-modal" ${busy}>취소</button>
-              <button class="button-primary" type="submit" ${busy}>잠금 해제</button>
-            </div>
-          </form>
-        </div>
-      </section>
-    </div>
-  `;
-}
-
 function renderSettingsModal() {
   const config = mergeSettings(state.settings).gitHubConfig;
   const busy = disabledAttr(isBusy());
@@ -775,7 +743,6 @@ function renderSettingsModal() {
           <form class="form-grid" data-form="settings-modal">
             ${renderSettingsFields(config, {
               tokenValue: "",
-              passphraseValue: "",
               showTokenFields: true,
               showCloseButton: true,
               isOnboarding: false,
@@ -789,46 +756,43 @@ function renderSettingsModal() {
 }
 
 function renderSettingsFields(config, options) {
-  const configLocked = hasStoredConnection() && !state.sessionToken && !options.isOnboarding;
   const busy = disabledAttr(isBusy());
-  const configReadonly = configLocked ? "readonly" : "";
 
   return `
     <div class="form-grid">
       <div class="split-fields">
         <div class="field-grid">
           <label for="github-owner">Owner</label>
-          <input id="github-owner" name="owner" value="${escapeAttr(config.owner)}" autocomplete="off" required ${configReadonly} ${busy} />
+          <input id="github-owner" name="owner" value="${escapeAttr(config.owner)}" autocomplete="off" required ${busy} />
         </div>
         <div class="field-grid">
           <label for="github-repo">Repository</label>
-          <input id="github-repo" name="repo" value="${escapeAttr(config.repo)}" autocomplete="off" required ${configReadonly} ${busy} />
+          <input id="github-repo" name="repo" value="${escapeAttr(config.repo)}" autocomplete="off" required ${busy} />
         </div>
       </div>
 
       <div class="split-fields">
         <div class="field-grid">
           <label for="github-branch">Branch</label>
-          <input id="github-branch" name="branch" value="${escapeAttr(config.branch)}" autocomplete="off" required ${configReadonly} ${busy} />
+          <input id="github-branch" name="branch" value="${escapeAttr(config.branch)}" autocomplete="off" required ${busy} />
         </div>
         <div class="field-grid">
           <label for="github-path">File Path</label>
-          <input id="github-path" name="filePath" value="${escapeAttr(config.filePath)}" autocomplete="off" required ${configReadonly} ${busy} />
+          <input id="github-path" name="filePath" value="${escapeAttr(config.filePath)}" autocomplete="off" required ${busy} />
         </div>
       </div>
 
       ${
-        configLocked
-          ? '<div class="form-note">저장소 경로 변경은 잠금 해제 후에만 할 수 있습니다.</div>'
-          : ""
-      }
-
-      ${
         options.showTokenFields
           ? `
+            ${
+              hasLegacyTokenMigrationPending()
+                ? '<div class="form-note">이전 방식으로 저장된 토큰은 읽을 수 없어 GitHub PAT를 한 번 다시 입력해야 합니다.</div>'
+                : ""
+            }
             <div class="field-grid">
               <label for="github-token">${
-                state.tokenEnvelope && !options.isOnboarding
+                state.token && !options.isOnboarding
                   ? "새 GitHub Personal Access Token 또는 비워두기"
                   : "GitHub Personal Access Token"
               }</label>
@@ -838,27 +802,11 @@ function renderSettingsFields(config, options) {
                 type="password"
                 value="${escapeAttr(options.tokenValue)}"
                 autocomplete="new-password"
-                ${options.isOnboarding && !state.tokenEnvelope ? "required" : ""}
+                ${!state.token ? "required" : ""}
                 ${busy}
               />
               <small class="form-note">
-                private repo 1개만 선택하고 <strong>Contents: Read and write</strong> 권한만 주는 fine-grained PAT를 권장합니다.
-              </small>
-            </div>
-            <div class="field-grid">
-              <label for="github-passphrase">${
-                state.tokenEnvelope && !options.isOnboarding ? "새 토큰을 저장할 때 사용할 passphrase" : "로컬 passphrase"
-              }</label>
-              <input
-                id="github-passphrase"
-                name="passphrase"
-                type="password"
-                value="${escapeAttr(options.passphraseValue)}"
-                autocomplete="new-password"
-                ${busy}
-              />
-              <small class="form-note">
-                토큰을 브라우저에 암호화 저장할 때만 사용합니다. 서버로 전송되지 않습니다.
+                private repo 1개만 선택하고 <strong>Contents: Read and write</strong> 권한만 주는 fine-grained PAT를 권장합니다. 입력한 PAT는 이 브라우저에 저장되어 이후 재입력 없이 사용합니다.
               </small>
             </div>
           `
@@ -868,7 +816,7 @@ function renderSettingsFields(config, options) {
       <div class="field-grid">
         <div class="form-section-title">동작 방식</div>
         <div class="readout muted">
-          잠금 해제하면 GitHub JSON을 다시 읽고, 이후 내역 변경은 저장할 때마다 GitHub JSON에 즉시 반영합니다.
+          저장된 PAT로 GitHub JSON을 바로 확인하고, 이후 내역 변경은 저장할 때마다 GitHub JSON에 즉시 반영합니다.
         </div>
       </div>
 
@@ -1336,8 +1284,22 @@ function statusDescriptor() {
     return {
       tone: "progress",
       summary: "GitHub에서 최신 데이터를 확인하는 중입니다.",
-      detail: "잠금 해제 후 저장소 연결과 최신 remote snapshot을 다시 확인하고 있습니다.",
+      detail: "저장된 GitHub PAT로 저장소 연결과 최신 remote snapshot을 다시 확인하고 있습니다.",
       badges: [{ label: "연결 확인 중" }],
+    };
+  }
+
+  if (hasLegacyTokenMigrationPending()) {
+    return {
+      tone: "danger",
+      summary: "보안 방식 변경으로 GitHub token을 한 번 다시 입력해야 합니다.",
+      detail: state.settings.lastFetchedAt
+        ? `마지막 remote 확인: ${formatDateTimeLabel(state.settings.lastFetchedAt)}. GitHub 설정에서 PAT를 다시 저장하면 이후에는 새로고침 후에도 바로 사용합니다.`
+        : "GitHub 설정에서 PAT를 다시 저장하면 이후에는 새로고침 후에도 바로 사용합니다.",
+      badges: [
+        { label: "조회 전용", className: "badge-danger" },
+        { label: "1회 재입력 필요" },
+      ],
     };
   }
 
@@ -1345,22 +1307,8 @@ function statusDescriptor() {
     return {
       tone: "neutral",
       summary: "GitHub 연결을 설정하세요.",
-      detail: "토큰과 저장소를 저장하면 최신 remote 확인과 자동 저장을 사용할 수 있습니다.",
+      detail: "토큰과 저장소를 저장하면 이후 재입력 없이 최신 remote 확인과 자동 저장을 사용할 수 있습니다.",
       badges: [],
-    };
-  }
-
-  if (isConnectionLocked()) {
-    return {
-      tone: "danger",
-      summary: "토큰이 잠겨 있어 현재 내역은 조회 전용입니다.",
-      detail: state.settings.lastFetchedAt
-        ? `마지막 remote 확인: ${formatDateTimeLabel(state.settings.lastFetchedAt)}. 잠금 해제하면 최신 변경을 다시 불러오고 자동 저장을 다시 켤 수 있습니다.`
-        : "잠금 해제하면 최신 변경을 다시 불러오고 수정 및 자동 저장을 다시 켤 수 있습니다.",
-      badges: [
-        { label: "조회 전용", className: "badge-danger" },
-        { label: "잠금 해제 필요" },
-      ],
     };
   }
 
@@ -1378,7 +1326,7 @@ function statusDescriptor() {
       details.join(" · ") || "변경 사항은 저장할 때마다 GitHub JSON에 즉시 반영됩니다.",
     badges: [
       { label: "자동 저장 활성", className: "badge-success" },
-      { label: "토큰 잠금 해제됨" },
+      { label: "PAT 저장됨" },
     ],
   };
 }
@@ -1411,8 +1359,6 @@ function handleClick(event) {
 
   if (action === "open-settings") {
     openModal("settings");
-  } else if (action === "open-unlock") {
-    openModal("unlock");
   } else if (action === "select-expense-kind-filter") {
     const nextFilter = String(button.dataset.filterKind ?? "all");
     if (!isExpenseKindFilter(nextFilter)) {
@@ -1420,9 +1366,6 @@ function handleClick(event) {
     }
     state.selectedExpenseKindFilter = nextFilter;
     normalizeSelection();
-    render();
-  } else if (action === "lock-session") {
-    state.sessionToken = null;
     render();
   } else if (action === "open-sources") {
     openModal("sources");
@@ -1530,11 +1473,6 @@ async function handleSubmit(event) {
       return;
     }
 
-    if (form.dataset.form === "unlock") {
-      await unlockSession(form);
-      return;
-    }
-
     if (form.dataset.form === "source-editor") {
       await saveSource(form);
       return;
@@ -1604,34 +1542,17 @@ async function saveSettings(form, closeOnSuccess) {
   const currentConfig = trimmedGitHubConfig(state.settings.gitHubConfig);
   const configChanged = !gitHubConfigEquals(currentConfig, gitHubConfig);
   const token = String(formData.get("token") ?? "").trim();
-  const passphrase = String(formData.get("passphrase") ?? "").trim();
 
   if (!isGitHubConfigValid(gitHubConfig)) {
     throw new Error("GitHub 저장소 설정을 모두 입력하세요.");
   }
 
-  if (configChanged && isConnectionLocked()) {
-    throw new Error("저장소 경로 변경은 잠금 해제 후에만 저장할 수 있습니다.");
-  }
-
-  if (!state.tokenEnvelope && !token) {
-    throw new Error("GitHub token을 입력하세요.");
-  }
-
-  if (token && !passphrase) {
-    throw new Error("새 토큰을 암호화 저장하려면 passphrase가 필요합니다.");
-  }
-
-  const nextTokenEnvelope = token ? await encryptToken(token, passphrase) : state.tokenEnvelope;
-  const sessionToken = token ? token : state.sessionToken;
-
-  if (!sessionToken) {
-    if (closeOnSuccess) {
-      closeModal();
-    } else {
-      render();
+  const nextToken = token || state.token;
+  if (!nextToken) {
+    if (hasLegacyTokenMigrationPending()) {
+      throw new Error("보안 방식이 바뀌어 GitHub token을 한 번 다시 입력해야 합니다.");
     }
-    return;
+    throw new Error("GitHub token을 입력하세요.");
   }
 
   state.isBootstrapping = true;
@@ -1639,17 +1560,13 @@ async function saveSettings(form, closeOnSuccess) {
   render();
 
   try {
-    const envelope = await fetchSnapshot(gitHubConfig, sessionToken);
-    state.tokenEnvelope = nextTokenEnvelope;
-    state.sessionToken = sessionToken;
+    const envelope = await fetchSnapshot(gitHubConfig, nextToken);
+    state.token = nextToken;
     applyFetchedSnapshot(envelope, {
       gitHubConfig,
       lastSyncedAt: configChanged ? null : state.settings.lastSyncedAt,
     });
-
-    if (token) {
-      await persistTokenEnvelope(state.tokenEnvelope);
-    }
+    await persistConnectionToken(state.token);
     await persistSnapshot(state.snapshot);
     await persistSettings(state.settings);
 
@@ -1662,20 +1579,18 @@ async function saveSettings(form, closeOnSuccess) {
   }
 }
 
-async function unlockSession(form) {
-  if (!state.tokenEnvelope) {
-    throw new Error("저장된 토큰이 없습니다. GitHub 설정에서 먼저 token을 저장하세요.");
+async function persistConnectionToken(token) {
+  await persistToken(token);
+  await clearLegacyTokenStorage();
+}
+
+async function clearLegacyTokenStorage() {
+  if (!state.hasLegacyTokenEnvelope) {
+    return;
   }
 
-  const passphrase = String(new FormData(form).get("passphrase") ?? "").trim();
-  if (!passphrase) {
-    throw new Error("passphrase를 입력하세요.");
-  }
-
-  state.sessionToken = await decryptToken(state.tokenEnvelope, passphrase);
-  closeModal(false);
-  render();
-  await bootstrapFromRemote({ lockOnFailure: true });
+  await clearLegacyTokenEnvelope();
+  state.hasLegacyTokenEnvelope = false;
 }
 
 async function saveSource(form) {
@@ -1800,9 +1715,7 @@ async function performConfirm(form) {
   }
 }
 
-async function bootstrapFromRemote(options = {}) {
-  const { lockOnFailure = false } = options;
-
+async function bootstrapFromRemote() {
   if (!canRunRemoteAction()) {
     return;
   }
@@ -1812,14 +1725,12 @@ async function bootstrapFromRemote(options = {}) {
   render();
 
   try {
-    const envelope = await fetchSnapshot(state.settings.gitHubConfig, state.sessionToken);
+    const envelope = await fetchSnapshot(state.settings.gitHubConfig, state.token);
     applyFetchedSnapshot(envelope);
+    await clearLegacyTokenStorage();
     await persistSnapshot(state.snapshot);
     await persistSettings(state.settings);
   } catch (error) {
-    if (lockOnFailure) {
-      state.sessionToken = null;
-    }
     throw error instanceof Error ? error : new Error("GitHub에서 데이터를 불러오지 못했습니다.");
   } finally {
     state.isBootstrapping = false;
@@ -1838,7 +1749,7 @@ async function commitSnapshot(nextSnapshot) {
   try {
     const nextSHA = await pushSnapshot(
       state.settings.gitHubConfig,
-      state.sessionToken,
+      state.token,
       normalizedSnapshot,
       state.settings.remoteSHA
     );

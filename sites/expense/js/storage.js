@@ -4,17 +4,26 @@ const STORE_NAME = "kv";
 const KEYS = {
   snapshot: "snapshot",
   settings: "settings",
-  tokenEnvelope: "tokenEnvelope",
+  token: "token",
+  legacyTokenEnvelope: "tokenEnvelope",
 };
 
 let openRequest = null;
 let warnedFallback = false;
 
 export async function loadPersistedState() {
+  const [snapshot, settings, token, legacyTokenEnvelope] = await Promise.all([
+    getValue(KEYS.snapshot),
+    getValue(KEYS.settings),
+    getValue(KEYS.token),
+    getValue(KEYS.legacyTokenEnvelope),
+  ]);
+
   return {
-    snapshot: await getValue(KEYS.snapshot),
-    settings: await getValue(KEYS.settings),
-    tokenEnvelope: await getValue(KEYS.tokenEnvelope),
+    snapshot,
+    settings,
+    token: typeof token === "string" && token ? token : null,
+    hasLegacyTokenEnvelope: legacyTokenEnvelope != null,
   };
 }
 
@@ -26,12 +35,12 @@ export function persistSettings(settings) {
   return setValue(KEYS.settings, settings);
 }
 
-export function persistTokenEnvelope(tokenEnvelope) {
-  return setValue(KEYS.tokenEnvelope, tokenEnvelope);
+export function persistToken(token) {
+  return setValue(KEYS.token, token);
 }
 
-export function clearTokenEnvelope() {
-  return deleteValue(KEYS.tokenEnvelope);
+export function clearLegacyTokenEnvelope() {
+  return deleteValue(KEYS.legacyTokenEnvelope);
 }
 
 async function getValue(key) {
