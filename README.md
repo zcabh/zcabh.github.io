@@ -12,7 +12,11 @@ GitHub Pages로 공개하는 정적 사이트 저장소입니다.
 │   ├── actions/build-pages-site/action.yml
 │   └── workflows/deploy-pages.yml
 ├── shared/
-│   └── styles/portal.css
+│   ├── fonts/
+│   │   └── PretendardVariable.woff2
+│   └── styles/
+│       ├── app.css
+│       └── portal.css
 ├── scripts/
 │   ├── build-pages.mjs
 │   └── validate-pages.mjs
@@ -27,6 +31,7 @@ GitHub Pages로 공개하는 정적 사이트 저장소입니다.
 │       ├── js/
 │       ├── site.json
 │       └── styles.css
+├── package-lock.json
 └── package.json
 ```
 
@@ -34,13 +39,17 @@ GitHub Pages로 공개하는 정적 사이트 저장소입니다.
 
 ```sh
 npm run validate
+npm run build:css
 npm run build
 npm run preview
 ```
 
 - `validate`: `sites/*` 아래 페이지 메타데이터와 필수 파일을 검사합니다.
+- `build:css`: Tailwind + daisyUI 기반 공통 스타일시트를 생성합니다.
 - `build`: `dist/`를 만들고 루트 인덱스와 각 페이지 산출물을 생성합니다.
 - `preview`: `dist/`를 로컬 정적 서버로 미리 봅니다.
+
+공통 UI 폰트는 `shared/fonts/PretendardVariable.woff2`를 로컬 asset으로 포함해 배포합니다. CI는 `npm ci`를 사용하므로 `package-lock.json`도 함께 유지해야 합니다.
 
 ## Add A New Page
 

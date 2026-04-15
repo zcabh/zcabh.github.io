@@ -181,6 +181,15 @@ function months() {
   return state.snapshot.monthPages.map((entry) => entry.yearMonth).sort(compareYearMonths);
 }
 
+function defaultSelectedMonthKey(availableMonths, today = new Date()) {
+  const todayMonthKey = yearMonthKey(yearMonthFromDate(today));
+  return (
+    availableMonths.find((month) => yearMonthKey(month) === todayMonthKey) ??
+    availableMonths[availableMonths.length - 1] ??
+    null
+  );
+}
+
 function currentTotals() {
   const month = currentMonth();
   return month ? totalsForMonth(month, state.snapshot, state.selectedExpenseKindFilter) : [];
@@ -271,7 +280,7 @@ function normalizeSelection() {
   }
 
   if (!availableMonths.some((month) => yearMonthKey(month) === state.selectedMonthKey)) {
-    state.selectedMonthKey = yearMonthKey(availableMonths[availableMonths.length - 1]);
+    state.selectedMonthKey = yearMonthKey(defaultSelectedMonthKey(availableMonths));
   }
 
   const visibleTotals = currentTotals();
@@ -289,12 +298,50 @@ function isExpenseKindFilter(value) {
 }
 
 function render() {
+  syncDocumentState();
+
   if (requiresOnboarding()) {
     root.innerHTML = renderOnboarding();
+    syncSelectedMonthButton();
     return;
   }
 
   root.innerHTML = renderDashboard();
+  syncSelectedMonthButton();
+}
+
+function syncDocumentState() {
+  document.body.classList.toggle("app-has-modal", Boolean(state.modal));
+}
+
+function syncSelectedMonthButton() {
+  if (!window.matchMedia("(max-width: 899px)").matches) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    const selectedButton = root.querySelector(".month-button.is-selected");
+    const monthList = selectedButton?.closest(".month-list");
+    if (!selectedButton || !monthList) {
+      return;
+    }
+
+    const listRect = monthList.getBoundingClientRect();
+    const buttonRect = selectedButton.getBoundingClientRect();
+    const horizontalPadding = 12;
+    if (
+      buttonRect.left >= listRect.left + horizontalPadding &&
+      buttonRect.right <= listRect.right - horizontalPadding
+    ) {
+      return;
+    }
+
+    selectedButton.scrollIntoView({
+      block: "nearest",
+      inline: "center",
+      behavior: "auto",
+    });
+  });
 }
 
 function renderOnboarding() {
@@ -302,11 +349,12 @@ function renderOnboarding() {
   const showTokenFields = true;
 
   return `
-    <div class="app-frame">
+    <div class="app-frame app-frame-expense">
       ${renderStatusBar()}
       <section class="onboarding-shell">
         <div class="onboarding-copy">
           <div class="brand-block">
+            <div class="brand-kicker">Expense tracker</div>
             <h1 class="brand-title">Track Your Expense Web</h1>
             <p class="brand-copy">
               GitHub Pages에 올릴 수 있는 정적 웹 앱입니다. 실제 지출 데이터는 별도 private
@@ -352,9 +400,10 @@ function renderDashboard() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="app-frame">
+    <div class="app-frame app-frame-expense">
       <div class="topbar">
         <div class="brand-block">
+          <div class="brand-kicker">Expense tracker</div>
           <h1 class="brand-title">Track Your Expense Web</h1>
           <p class="brand-copy">
             저장된 GitHub PAT로 최신 JSON을 다시 확인하고, 이후 변경 사항은 저장할 때마다 GitHub에 즉시 반영합니다.
@@ -368,16 +417,16 @@ function renderDashboard() {
       ${renderStatusBar()}
 
       <div class="toolbar">
-        <button class="button-ghost" type="button" data-action="open-sources" ${disabledAttr(!editable)}>카드/계좌</button>
-        <button class="button-ghost" type="button" data-action="open-rates" ${disabledAttr(!editable)}>환율 설정</button>
         <button
-          class="button-ghost"
+          class="button-primary"
           type="button"
           data-action="open-add-expense"
           ${disabledAttr(!editable || months().length === 0 || state.snapshot.sources.length === 0)}
         >
           지출 추가
         </button>
+        <button class="button-ghost" type="button" data-action="open-sources" ${disabledAttr(!editable)}>카드/계좌</button>
+        <button class="button-subtle" type="button" data-action="open-rates" ${disabledAttr(!editable)}>환율 설정</button>
         <button class="button-ghost" type="button" data-action="open-add-month" ${disabledAttr(!editable)}>월 추가</button>
       </div>
 
@@ -386,7 +435,7 @@ function renderDashboard() {
           ? renderEmptyDashboard()
           : `
             <div class="dashboard-grid">
-              <section class="panel">
+              <section class="panel panel-months">
                 <div class="panel-head">
                   <div>
                     <div class="form-section-title">월 목록</div>
@@ -415,7 +464,7 @@ function renderDashboard() {
                 </div>
               </section>
 
-              <section class="panel">
+              <section class="panel panel-summary">
                 <div class="panel-head">
                   <div class="summary-panel-head">
                     <div class="summary-block">
@@ -466,9 +515,9 @@ function renderDashboard() {
                                       class="source-dot"
                                       style="background:${colorForSource(entry.source.id)}"
                                     ></span>
-                                    <div class="stack">
+                                    <div class="source-total-copy">
                                       <span class="source-name">${escapeHtml(entry.source.name)}</span>
-                                      <span class="muted">${sourceKindMeta[entry.source.kind].title}</span>
+                                      <span class="source-kind-label">${sourceKindMeta[entry.source.kind].title}</span>
                                     </div>
                                   </div>
                                   <div class="source-total-amount">${formatAmount(entry.total, "krw")}</div>
@@ -482,7 +531,7 @@ function renderDashboard() {
                 </div>
               </section>
 
-              <section class="panel">
+              <section class="panel panel-entries">
                 <div class="panel-head">
                   <div>
                     <div class="form-section-title">
@@ -533,7 +582,7 @@ function renderDashboard() {
                                       : "expense-row-current-or-past"
                                   }">
                                     <div class="expense-main">
-                                      <div class="stack">
+                                      <div class="expense-copy">
                                         <div class="expense-title">${
                                           escapeHtml(entry.expense.description ?? "설명 없음")
                                         }</div>
@@ -548,14 +597,14 @@ function renderDashboard() {
                                           <span>${currencyMeta[entry.expense.currency].code}</span>
                                         </div>
                                       </div>
-                                      <div class="stack" style="text-align:right;">
+                                      <div class="expense-side">
                                         <strong>${formatAmount(entry.expense.amountMinorUnits, entry.expense.currency)}</strong>
                                         ${
                                           formattedKRWEquivalent(
                                             entry.expense,
                                             state.snapshot.exchangeRates ?? emptyExchangeRates()
                                           )
-                                            ? `<span class="muted">${formattedKRWEquivalent(
+                                            ? `<span class="expense-side-secondary">${formattedKRWEquivalent(
                                                 entry.expense,
                                                 state.snapshot.exchangeRates ?? emptyExchangeRates()
                                               )}</span>`
@@ -563,7 +612,7 @@ function renderDashboard() {
                                         }
                                       </div>
                                     </div>
-                                    <div class="expense-meta">
+                                    <div class="expense-actions">
                                       <button
                                         class="button-subtle"
                                         type="button"
@@ -683,7 +732,7 @@ function renderEmptyDashboard() {
           월 페이지는 사용자가 명시적으로 만듭니다. 먼저 월을 하나 추가하고, 필요하면 카드나 계좌를 등록한 다음 지출을 입력하세요.
         </p>
       </div>
-      <div class="form-actions" style="justify-content:flex-start;">
+      <div class="form-actions is-start">
         <button class="button-primary" type="button" data-action="open-add-month" ${disabledAttr(!editable)}>월 추가</button>
         <button class="button-ghost" type="button" data-action="open-sources" ${disabledAttr(!editable)}>카드/계좌 관리</button>
       </div>
@@ -728,9 +777,9 @@ function renderSettingsModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal wide">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal is-wide">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">GitHub 설정</h2>
             <p class="modal-copy">
@@ -739,7 +788,7 @@ function renderSettingsModal() {
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="settings-modal">
             ${renderSettingsFields(config, {
               tokenValue: "",
@@ -838,9 +887,9 @@ function renderSourcesModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal wide">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal is-wide">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">카드/계좌 관리</h2>
             <p class="modal-copy">source 삭제 시 연결된 모든 지출도 함께 삭제됩니다.</p>
@@ -850,7 +899,7 @@ function renderSourcesModal() {
             <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
           </div>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           ${
             sources.length === 0
               ? `
@@ -915,16 +964,16 @@ function renderSourceEditorModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">${isEditing ? "카드/계좌 수정" : "카드/계좌 추가"}</h2>
             <p class="modal-copy">정렬 순서는 항상 source ID 오름차순입니다.</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="source-editor">
             <input type="hidden" name="id" value="${escapeAttr(draft.id ?? "")}" />
             <div class="field-grid">
@@ -970,16 +1019,16 @@ function renderMonthEditorModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">월 추가</h2>
             <p class="modal-copy">월 페이지는 자동 생성되지 않고 사용자가 명시적으로 생성합니다.</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="month-editor">
             <div class="field-grid">
               <label for="month-value">월</label>
@@ -1006,16 +1055,16 @@ function renderRatesModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">환율 설정</h2>
             <p class="modal-copy">저장한 환율은 GitHub JSON에 즉시 반영되고, 월별 KRW 합계 계산에도 바로 반영됩니다.</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="rates-editor">
             <div class="split-fields">
               <div class="field-grid">
@@ -1048,16 +1097,16 @@ function renderExpenseEditorModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal wide">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal is-wide">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">${draft.id ? "지출 수정" : "지출 추가"}</h2>
             <p class="modal-copy">반복 지출 수정은 특정 월 예외가 아니라 전체 규칙 수정입니다.</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           ${
             state.snapshot.sources.length === 0
               ? `
@@ -1230,16 +1279,16 @@ function renderConfirmModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">${escapeHtml(modal.title)}</h2>
             <p class="modal-copy confirm-copy">${escapeHtml(modal.message)}</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="confirm-action">
             <input type="hidden" name="confirmType" value="${escapeAttr(modal.type)}" />
             ${

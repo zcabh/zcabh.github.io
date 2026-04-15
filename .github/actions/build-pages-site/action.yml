@@ -9,6 +9,10 @@ runs:
       with:
         node-version: "22"
 
+    - name: Install dependencies
+      shell: bash
+      run: npm ci
+
     - name: Validate page manifests
       shell: bash
       run: npm run validate

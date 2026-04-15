@@ -197,23 +197,62 @@ function normalizeFilterSelection() {
 }
 
 function render() {
+  syncDocumentState();
+
   if (requiresOnboarding()) {
     root.innerHTML = renderOnboarding();
+    syncSelectedFilterChip();
     return;
   }
 
   root.innerHTML = renderDashboard();
+  syncSelectedFilterChip();
+}
+
+function syncDocumentState() {
+  document.body.classList.toggle("app-has-modal", Boolean(state.modal));
+}
+
+function syncSelectedFilterChip() {
+  if (!window.matchMedia("(max-width: 899px)").matches) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    const selectedChip = root.querySelector(".filter-chip.is-selected");
+    const filterRow = selectedChip?.closest(".filter-chip-row");
+    if (!selectedChip || !filterRow) {
+      return;
+    }
+
+    const rowRect = filterRow.getBoundingClientRect();
+    const chipRect = selectedChip.getBoundingClientRect();
+    const horizontalPadding = 12;
+    if (
+      chipRect.left >= rowRect.left + horizontalPadding &&
+      chipRect.right <= rowRect.right - horizontalPadding
+    ) {
+      return;
+    }
+
+    selectedChip.scrollIntoView({
+      block: "nearest",
+      inline: "center",
+      behavior: "auto",
+    });
+  });
 }
 
 function renderOnboarding() {
   const config = mergeSettings(state.settings).gitHubConfig;
 
   return `
-    <div class="app-frame">
+    <div class="app-frame app-frame-pantry">
       ${renderStatusBar()}
       <section class="onboarding-shell">
         <div class="onboarding-copy">
           <div class="brand-block">
+            <div class="brand-kicker">Expiry tracker</div>
             <h1 class="brand-title">Track Your Pantry Web</h1>
             <p class="brand-copy">
               GitHub Pages에 올릴 수 있는 정적 웹 앱입니다. 실제 물품 재고 데이터는 별도 private repository의
@@ -254,9 +293,10 @@ function renderDashboard() {
   const hasFilteredItems = filteredItems.length > 0;
 
   return `
-    <div class="app-frame">
+    <div class="app-frame app-frame-pantry">
       <div class="topbar">
         <div class="brand-block">
+          <div class="brand-kicker">Expiry tracker</div>
           <h1 class="brand-title">Track Your Pantry Web</h1>
           <p class="brand-copy">
             유통기한이 있는 물품을 기록하고, 기한이 임박한 순으로 한 눈에 관리합니다.
@@ -306,7 +346,8 @@ function renderFilterChipRow() {
         data-action="set-filter"
         data-filter-value="all"
       >
-        전체 <span class="muted">${totalCount}</span>
+        <span class="filter-chip-label">전체</span>
+        <span class="muted">${totalCount}</span>
       </button>
     `,
     ...state.snapshot.types.map((type) => {
@@ -320,7 +361,8 @@ function renderFilterChipRow() {
           data-filter-value="${type.id}"
         >
           <span class="type-dot color-${escapeAttr(type.color)}"></span>
-          ${escapeHtml(type.name)} <span class="muted">${count}</span>
+          <span class="filter-chip-label">${escapeHtml(type.name)}</span>
+          <span class="muted">${count}</span>
         </button>
       `;
     }),
@@ -381,7 +423,7 @@ function renderItemCard(entry, editable) {
   return `
     <article class="item-card ${cardClass}">
       <div class="item-main">
-        <div class="stack">
+        <div class="stack item-copy">
           <div class="item-heading">
             ${typeDot}
             <div class="item-name">${escapeHtml(item.name)}</div>
@@ -394,7 +436,7 @@ function renderItemCard(entry, editable) {
           </div>
           ${notesText}
         </div>
-        <div class="stack" style="align-items:flex-end;">
+        <div class="stack item-side">
           <div class="quantity-control">
             <strong>${item.quantity}개</strong>
             <button
@@ -460,7 +502,7 @@ function renderEmptyDashboard() {
           저장된 항목은 기한이 가까운 순으로 자동 정렬됩니다.
         </p>
       </div>
-      <div class="form-actions" style="justify-content:flex-start;">
+      <div class="form-actions is-start">
         <button class="button-primary" type="button" data-action="open-add-item" ${disabledAttr(!editable || state.snapshot.types.length === 0)}>+ 새 물품</button>
         <button class="button-ghost" type="button" data-action="open-type-manager" ${disabledAttr(!editable)}>타입 관리</button>
       </div>
@@ -579,9 +621,9 @@ function renderSettingsModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal wide">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal is-wide">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">GitHub 설정</h2>
             <p class="modal-copy">
@@ -590,7 +632,7 @@ function renderSettingsModal() {
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="settings-modal">
             ${renderSettingsFields(config, {
               tokenValue: "",
@@ -691,16 +733,16 @@ function renderTypeManagerModal() {
   const types = state.snapshot.types;
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal wide">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal is-wide">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">타입 관리</h2>
             <p class="modal-copy">물품의 분류를 추가하거나 정리합니다. 속한 물품이 있는 타입은 삭제할 수 없습니다.</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           ${
             types.length === 0
               ? `
@@ -744,7 +786,7 @@ function renderTypeManagerModal() {
               `
           }
 
-          <form class="form-grid" data-form="type-editor" style="margin-top: 22px;">
+          <form class="form-grid form-grid-spaced" data-form="type-editor">
             <div class="form-section-title">새 타입 추가</div>
             <div class="split-fields">
               <div class="field-grid">
@@ -800,16 +842,16 @@ function renderItemEditorModal() {
   const types = state.snapshot.types;
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal wide">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal is-wide">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">${draft.id ? "물품 수정" : "새 물품"}</h2>
             <p class="modal-copy">사용기한이 가까운 순으로 정렬되며, 0개가 되면 자동으로 삭제됩니다.</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           ${
             types.length === 0
               ? `
@@ -931,16 +973,16 @@ function renderConfirmModal() {
   const busy = disabledAttr(isBusy());
 
   return `
-    <div class="modal-backdrop">
-      <section class="modal">
-        <div class="modal-head">
+    <div class="app-modal-backdrop">
+      <section class="app-modal">
+        <div class="app-modal-head">
           <div>
             <h2 class="modal-title">${escapeHtml(modal.title)}</h2>
             <p class="modal-copy confirm-copy">${escapeHtml(modal.message)}</p>
           </div>
           <button class="button-subtle" type="button" data-action="close-modal" ${busy}>닫기</button>
         </div>
-        <div class="modal-body">
+        <div class="app-modal-body">
           <form class="form-grid" data-form="confirm-action">
             <input type="hidden" name="confirmType" value="${escapeAttr(modal.type)}" />
             ${

@@ -4,7 +4,14 @@
   "type": "module",
   "scripts": {
     "validate": "node ./scripts/validate-pages.mjs",
-    "build": "node ./scripts/build-pages.mjs",
+    "build:css": "tailwindcss -i ./shared/styles/app.css -o ./shared/styles/tailwind.css --minify",
+    "build": "npm run build:css && node ./scripts/build-pages.mjs",
     "preview": "python3 -m http.server 4173 --directory dist"
+  },
+  "dependencies": {
+    "@tailwindcss/cli": "^4.2.2",
+    "daisyui": "^5.5.19",
+    "flowbite": "^4.0.1",
+    "tailwindcss": "^4.2.2"
   }
 }

@@ -10,6 +10,7 @@ on:
       - "shared/**"
       - "scripts/**"
       - "package.json"
+      - "package-lock.json"
       - ".github/actions/**"
       - ".github/workflows/**"
 
