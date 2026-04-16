@@ -881,6 +881,11 @@ button:disabled {
     align-items: stretch;
   }
 
+  .status-copy {
+    flex: none;
+    align-content: start;
+  }
+
   .form-actions > * {
     flex: 1 1 11rem;
   }
